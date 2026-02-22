@@ -998,15 +998,34 @@ def page_gestion_elevage():
                         st.success("Brebis ajoutée")
                         st.rerun()
             
-            brebis = db.fetchall("""
-                SELECT b.id, b.numero_id, b.nom, b.race, b.date_naissance, b.etat_physio, e.nom, b.poids_vif
-                FROM brebis b
-                JOIN elevages e ON b.elevage_id = e.id
-                JOIN eleveurs el ON e.eleveur_id = el.id
-                WHERE el.user_id=?
-            """, (st.session_state.user_id,))
+            # Vérifier si la colonne poids_vif existe dans la table
+            cursor = db.conn.execute("PRAGMA table_info(brebis)")
+            columns = [col[1] for col in cursor.fetchall()]
+            has_poids_vif = 'poids_vif' in columns
+
+            if has_poids_vif:
+                query = """
+                    SELECT b.id, b.numero_id, b.nom, b.race, b.date_naissance, b.etat_physio, e.nom, b.poids_vif
+                    FROM brebis b
+                    JOIN elevages e ON b.elevage_id = e.id
+                    JOIN eleveurs el ON e.eleveur_id = el.id
+                    WHERE el.user_id=?
+                """
+                brebis = db.fetchall(query, (st.session_state.user_id,))
+                col_names = ["ID", "Numéro", "Nom", "Race", "Naissance", "État", "Élevage", "Poids vif (kg)"]
+            else:
+                query = """
+                    SELECT b.id, b.numero_id, b.nom, b.race, b.date_naissance, b.etat_physio, e.nom
+                    FROM brebis b
+                    JOIN elevages e ON b.elevage_id = e.id
+                    JOIN eleveurs el ON e.eleveur_id = el.id
+                    WHERE el.user_id=?
+                """
+                brebis = db.fetchall(query, (st.session_state.user_id,))
+                col_names = ["ID", "Numéro", "Nom", "Race", "Naissance", "État", "Élevage"]
+
             if brebis:
-                df = pd.DataFrame(brebis, columns=["ID", "Numéro", "Nom", "Race", "Naissance", "État", "Élevage", "Poids vif (kg)"])
+                df = pd.DataFrame(brebis, columns=col_names)
                 st.dataframe(df, use_container_width=True, hide_index=True)
                 
                 with st.expander("🔧 Modifier / Supprimer une brebis"):
@@ -1032,8 +1051,8 @@ def page_gestion_elevage():
                         if st.button("Voir détails", key="details_brebis_btn"):
                             b = db.fetchone("SELECT * FROM brebis WHERE id=?", (bid,))
                             # Obtenir les noms de colonnes
-                            columns = [col[0] for col in db.conn.execute("PRAGMA table_info(brebis)").fetchall()]
-                            data = dict(zip(columns, b))
+                            cols = [col[0] for col in db.conn.execute("PRAGMA table_info(brebis)").fetchall()]
+                            data = dict(zip(cols, b))
                             # Remplacer les noms de fichiers par un indicateur
                             if data.get('photo_profil'):
                                 data['photo_profil'] = f"Fichier: {data['photo_profil']}"

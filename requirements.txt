@@ -5,3 +5,7 @@ opencv-python-headless
 Pillow
 plotly
 requests
+scipy, 
+statsmodels 
+openpyxl
+xlsxwriter

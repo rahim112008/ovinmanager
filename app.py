@@ -91,7 +91,7 @@ class Database:
     def init_database(self):
         cursor = self.conn.cursor()
         
-        # Tables existantes (inchangées)
+        # Tables existantes
         tables = [
             """CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT,
@@ -109,7 +109,7 @@ class Database:
                 id INTEGER PRIMARY KEY, elevage_id INTEGER, numero_id TEXT UNIQUE,
                 nom TEXT, race TEXT, date_naissance TEXT, etat_physio TEXT,
                 photo_profil TEXT, photo_mamelle TEXT, sequence_fasta TEXT,
-                variants_snps TEXT, profil_genetique TEXT
+                variants_snps TEXT, profil_genetique TEXT, poids_vif REAL
             )""",
             """CREATE TABLE IF NOT EXISTS mesures_morpho (
                 id INTEGER PRIMARY KEY, brebis_id INTEGER, date_mesure TIMESTAMP,
@@ -138,8 +138,7 @@ class Database:
         for table in tables:
             cursor.execute(table)
         
-        # ========== NOUVELLES TABLES ==========
-        # Production laitière et analyses biochimiques
+        # Nouvelles tables
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS productions (
                 id INTEGER PRIMARY KEY,
@@ -156,7 +155,6 @@ class Database:
             )
         """)
         
-        # Génotypes détaillés
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS genotypes (
                 id INTEGER PRIMARY KEY,
@@ -169,7 +167,6 @@ class Database:
             )
         """)
         
-        # Phénotypes
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS phenotypes (
                 id INTEGER PRIMARY KEY,
@@ -181,7 +178,6 @@ class Database:
             )
         """)
         
-        # Diagnostics maladies (optionnel)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS diagnostics (
                 id INTEGER PRIMARY KEY,
@@ -194,8 +190,7 @@ class Database:
             )
         """)
         
-        # ========== TABLES POUR LA NUTRITION ==========
-        # Aliments disponibles
+        # Tables nutrition
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS aliments (
                 id INTEGER PRIMARY KEY,
@@ -208,7 +203,6 @@ class Database:
             )
         """)
         
-        # Rations types
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS rations (
                 id INTEGER PRIMARY KEY,
@@ -218,7 +212,6 @@ class Database:
             )
         """)
         
-        # Composition des rations
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ration_composition (
                 id INTEGER PRIMARY KEY,
@@ -230,7 +223,7 @@ class Database:
             )
         """)
         
-        # ========== TABLES POUR LA SANTÉ ==========
+        # Tables santé
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS vaccinations (
                 id INTEGER PRIMARY KEY,
@@ -254,7 +247,7 @@ class Database:
             )
         """)
         
-        # ========== TABLES POUR LA REPRODUCTION ==========
+        # Tables reproduction
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chaleurs (
                 id INTEGER PRIMARY KEY,
@@ -272,7 +265,7 @@ class Database:
                 id INTEGER PRIMARY KEY,
                 brebis_id INTEGER,
                 date_saillie DATE,
-                male_id INTEGER,
+                male_id TEXT,
                 methode TEXT,
                 resultat TEXT,
                 FOREIGN KEY (brebis_id) REFERENCES brebis(id)
@@ -310,7 +303,7 @@ class Database:
         return cursor.fetchone()
 
 # -----------------------------------------------------------------------------
-# CLASSES MÉTIER (inchangées)
+# CLASSES MÉTIER
 # -----------------------------------------------------------------------------
 class OvinScience:
     @staticmethod
@@ -514,15 +507,787 @@ class GenomicAnalyzer:
         return results
 
 # -----------------------------------------------------------------------------
-# PAGES EXISTANTES (inchangées, sauf page_nutrition qui sera remplacée)
+# PAGES DE L'APPLICATION
 # -----------------------------------------------------------------------------
-# Les fonctions page_login, page_dashboard, page_genomique, page_composition,
-# page_prediction sont conservées telles quelles. Pour gagner de la place,
-# nous ne les réécrivons pas intégralement ici ; elles doivent être copiées
-# depuis le code original. Dans la version finale, elles seront présentes.
 
-# NOTE : Pour alléger la réponse, je ne recopie pas ces fonctions. 
-# Vous devez les insérer ici.
+def page_login():
+    st.markdown('<p class="main-header">🐑 Ovin Manager Pro</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="sub-header">Laboratoire {Config.LABORATOIRE} - Système Expert de Génétique Ovine</p>', unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        tab1, tab2 = st.tabs(["Connexion", "Inscription"])
+        
+        with tab1:
+            username = st.text_input("Nom d'utilisateur", key="login_user")
+            password = st.text_input("Mot de passe", type="password", key="login_pass")
+            
+            if st.button("Se connecter", use_container_width=True):
+                user = db.fetchone(
+                    "SELECT id FROM users WHERE username=? AND password_hash=?",
+                    (username, OvinScience.hash_password(password))
+                )
+                if user:
+                    st.session_state.user_id = user[0]
+                    st.session_state.current_page = "dashboard"
+                    st.rerun()
+                else:
+                    st.error("Identifiants incorrects")
+        
+        with tab2:
+            new_user = st.text_input("Nouvel utilisateur", key="new_user")
+            new_pass = st.text_input("Mot de passe", type="password", key="new_pass")
+            confirm_pass = st.text_input("Confirmer mot de passe", type="password")
+            
+            if st.button("Créer compte", use_container_width=True):
+                if new_pass != confirm_pass:
+                    st.error("Les mots de passe ne correspondent pas")
+                elif not new_user or not new_pass:
+                    st.error("Remplissez tous les champs")
+                else:
+                    try:
+                        db.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                                  (new_user, OvinScience.hash_password(new_pass)))
+                        st.success("Compte créé ! Connectez-vous")
+                    except:
+                        st.error("Nom d'utilisateur déjà pris")
+
+def page_dashboard():
+    st.title(f"📊 Tableau de Bord - {Config.LABORATOIRE}")
+    
+    stats = db.fetchone("""
+        SELECT 
+            (SELECT COUNT(*) FROM eleveurs WHERE user_id=?),
+            (SELECT COUNT(*) FROM brebis b JOIN elevages e ON b.elevage_id = e.id 
+             JOIN eleveurs el ON e.eleveur_id = el.id WHERE el.user_id=?),
+            (SELECT COUNT(*) FROM composition_corporelle cc 
+             JOIN brebis b ON cc.brebis_id = b.id JOIN elevages e ON b.elevage_id = e.id
+             JOIN eleveurs el ON e.eleveur_id = el.id WHERE el.user_id=?)
+    """, (st.session_state.user_id, st.session_state.user_id, st.session_state.user_id))
+    
+    cols = st.columns(4)
+    metrics = [
+        ("👨‍🌾 Éleveurs", stats[0], Config.VERT),
+        ("🐑 Brebis", stats[1], Config.BLEU),
+        ("🧬 Analyses", stats[2], Config.CYAN),
+        ("📈 Données", stats[0] + stats[1] + stats[2], Config.ORANGE)
+    ]
+    
+    for col, (label, value, color) in zip(cols, metrics):
+        with col:
+            st.markdown(f"""
+            <div style="background-color: {color}20; border-radius: 10px; padding: 20px; text-align: center; border-left: 5px solid {color}">
+                <h3 style="color: {color}; margin: 0;">{value}</h3>
+                <p style="margin: 0; color: #666;">{label}</p>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    st.divider()
+    
+    st.subheader("🚀 Modules Génomiques & Analytiques")
+    
+    modules = [
+        ("🧬 Analyse NCBI/GenBank", "Recherche gènes, SNPs, BLAST", "genomique", Config.CYAN),
+        ("🥩 Composition Corporelle", "Estimation viande/graisse/os", "composition", Config.ORANGE),
+        ("📸 Photogrammétrie", "Mesures morphométriques IA", "analyse", Config.VERT),
+        ("🥛 Prédiction Lait", "ML potentiel laitier", "prediction", Config.VIOLET),
+        ("🌾 Nutrition", "Formulation rations", "nutrition_avancee", Config.BLEU),
+    ]
+    
+    cols = st.columns(3)
+    for i, (title, desc, page, color) in enumerate(modules):
+        with cols[i % 3]:
+            with st.container():
+                st.markdown(f"""
+                <div style="background-color: white; border-radius: 10px; padding: 20px; 
+                            box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px;
+                            border-top: 4px solid {color};">
+                    <h4 style="color: {color}; margin-top: 0;">{title}</h4>
+                    <p style="color: #666; font-size: 0.9rem;">{desc}</p>
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("Ouvrir →", key=f"btn_{page}", use_container_width=True):
+                    st.session_state.current_page = page
+                    st.rerun()
+
+def page_genomique():
+    st.title("🧬 Analyse Génomique - NCBI/GenBank")
+    
+    tab1, tab2, tab3 = st.tabs(["🔍 Recherche Gène", "🏆 Profil Race", "🧪 SNPs/QTN"])
+    
+    with tab1:
+        st.subheader("Recherche dans NCBI Gene")
+        
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            gene_search = st.text_input("Nom du gène", "BMP15", 
+                                       help="Ex: BMP15, MSTN, DGAT1, CAST...")
+        with col2:
+            organism = st.selectbox("Organisme", ["Ovis aries (Mouton)", "Capra hircus (Chèvre)", "Bos taurus (Bovin)"])
+        
+        if st.button("🔍 Rechercher dans NCBI", use_container_width=True):
+            results = genomic_analyzer.ncbi.search_gene(gene_search, "Ovis aries")
+            
+            if results:
+                for gene in results:
+                    with st.container():
+                        st.markdown(f"""
+                        <div class="gene-card">
+                            <h4>🧬 {gene['name']} (ID: {gene['gene_id']})</h4>
+                            <p><strong>Description:</strong> {gene['description']}</p>
+                            <p><strong>Chromosome:</strong> {gene['chromosome']} | <strong>Position:</strong> {gene['map_location']}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        local_info = Config.GENES_ECONOMIQUES.get(gene_search.upper())
+                        if local_info:
+                            st.info(f"**Effet économique:** {local_info['effet']}")
+            else:
+                local = Config.GENES_ECONOMIQUES.get(gene_search.upper())
+                if local:
+                    st.success("Informations depuis la base locale GenApAgiE")
+                    st.json(local)
+                else:
+                    st.warning("Gène non trouvé. Essayez: BMP15, MSTN, DGAT1, CAST, CAPN1...")
+    
+    with tab2:
+        st.subheader("Profil Génétique par Race")
+        
+        race_selected = st.selectbox("Sélectionner une race", list(Config.RACES.keys()))
+        
+        if st.button("🧬 Analyser le profil génétique"):
+            analysis = genomic_analyzer.analyze_race_profile(race_selected)
+            
+            fig = go.Figure(data=go.Scatterpolar(
+                r=[analysis['score_reproduction'], analysis['score_croissance'], 
+                   analysis['score_lait'], analysis['score_reproduction']],
+                theta=['Reproduction', 'Croissance/Viande', 'Lait', 'Reproduction'],
+                fill='toself',
+                name=race_selected
+            ))
+            fig.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                showlegend=False,
+                title=f"Profil Génétique: {race_selected}"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.subheader("Gènes Majeurs")
+            for gene in analysis['genes']:
+                with st.expander(f"🧬 {gene['symbole']} - {gene['nom'][:40]}..."):
+                    st.write(f"**Effet:** {gene['effet']}")
+                    st.write(f"**Chromosome:** {gene['chromosome']}")
+            
+            if analysis['recommandations']:
+                st.success("### ✅ Recommandations")
+                for rec in analysis['recommandations']:
+                    st.write(rec)
+    
+    with tab3:
+        st.subheader("Base de données SNPs et QTN économiques")
+        
+        categorie = st.selectbox("Filtrer par catégorie", 
+                                ["Tous", "Reproduction", "Croissance/Viande", "Lait", "Résistance", "Qualité viande"])
+        
+        genes_filtres = []
+        for sym, info in Config.GENES_ECONOMIQUES.items():
+            if categorie == "Tous":
+                genes_filtres.append((sym, info))
+            elif categorie == "Reproduction" and any(x in sym for x in ["BMP", "GDF"]):
+                genes_filtres.append((sym, info))
+            elif categorie == "Croissance/Viande" and any(x in sym for x in ["MSTN", "IGF", "GH"]):
+                genes_filtres.append((sym, info))
+            elif categorie == "Lait" and any(x in sym for x in ["LALBA", "CSN", "DGAT", "SCD"]):
+                genes_filtres.append((sym, info))
+            elif categorie == "Résistance" and any(x in sym for x in ["TLR", "MHC", "PRNP"]):
+                genes_filtres.append((sym, info))
+            elif categorie == "Qualité viande" and any(x in sym for x in ["CAST", "CAPN", "FABP"]):
+                genes_filtres.append((sym, info))
+        
+        df_genes = pd.DataFrame([
+            {
+                "Symbole": sym,
+                "Nom": info["nom"][:50] + "...",
+                "Chr": info["chr"],
+                "Effet": info["effet"][:60] + "...",
+                "Type": "QTN" if sym in ["BMP15", "MSTN", "DGAT1", "BMPR1B"] else "SNP"
+            }
+            for sym, info in genes_filtres
+        ])
+        
+        st.dataframe(df_genes, use_container_width=True, hide_index=True)
+        
+        gene_detail = st.selectbox("Voir détails", [sym for sym, _ in genes_filtres])
+        if gene_detail:
+            info = Config.GENES_ECONOMIQUES[gene_detail]
+            st.json(info)
+
+def page_composition():
+    st.title("🥩 Composition Corporelle Estimée")
+    st.markdown("Estimation détaillée de la répartition viande/graisse/os basée sur les équations zootechniques")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        poids_vif = st.number_input("Poids vif (kg)", min_value=10.0, max_value=150.0, value=45.0, step=0.5)
+    with col2:
+        race = st.selectbox("Race", list(Config.RACES.keys()))
+    with col3:
+        cc = st.slider("Condition Corporelle (1-5)", min_value=1.0, max_value=5.0, value=3.0, step=0.5,
+                      help="1=Très maigre, 3=Idéal, 5=Très gras")
+    
+    if st.button("🧮 Calculer la composition", use_container_width=True):
+        comp = OvinScience.estimer_composition(poids_vif, race, cc)
+        
+        if "erreur" in comp:
+            st.error(comp["erreur"])
+            return
+        
+        st.subheader("📊 Résultats")
+        
+        cols = st.columns(4)
+        metrics = [
+            ("🥩 Viande", comp['viande']['kg'], comp['viande']['pct'], Config.VERT),
+            ("🥓 Graisse", comp['graisse']['kg'], comp['graisse']['pct'], Config.ORANGE),
+            ("🦴 Os", comp['os']['kg'], comp['os']['pct'], "grey"),
+            ("📦 Carcasse", comp['poids_carcasse'], comp['rendement'], Config.BLEU)
+        ]
+        
+        for col, (label, kg, pct, color) in zip(cols, metrics):
+            with col:
+                st.markdown(f"""
+                <div style="background-color: {color}15; border-radius: 10px; padding: 20px; 
+                            text-align: center; border-left: 4px solid {color};">
+                    <h4 style="color: {color}; margin: 0;">{kg} kg</h4>
+                    <p style="margin: 0; font-size: 0.9rem;">{label}</p>
+                    <p style="margin: 0; font-size: 0.8rem; color: #666;">{pct}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        fig = go.Figure(data=[go.Pie(
+            labels=['Viande', 'Graisse', 'Os'],
+            values=[comp['viande']['kg'], comp['graisse']['kg'], comp['os']['kg']],
+            marker_colors=[Config.VERT, Config.ORANGE, 'grey'],
+            hole=0.4
+        )])
+        fig.update_layout(title="Composition de la carcasse (kg)")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("🔪 Découpes principales")
+            decoupes_data = {
+                "Découpe": ["Gigot", "Épaule", "Côtelettes", "Poitrine"],
+                "Poids (kg)": [comp['decoupes']['gigot'], comp['decoupes']['epaule'],
+                              comp['decoupes']['cotelette'], comp['decoupes']['poitrine']],
+                "% Carcasse": [22, 17, 14, 12]
+            }
+            df_decoupes = pd.DataFrame(decoupes_data)
+            st.dataframe(df_decoupes, hide_index=True, use_container_width=True)
+            
+            st.metric("Indice conformation", f"{comp['qualite']['conformation']}/15")
+            st.metric("Score gras", f"{comp['qualite']['gras']}/5")
+        
+        if st.button("💾 Enregistrer dans la base de données"):
+            st.success("Composition enregistrée !")
+
+def page_prediction():
+    st.title("🔮 Prédiction par Machine Learning")
+    
+    st.subheader("Potentiel laitier estimé")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        score_mam = st.slider("Score mamelles", 1.0, 10.0, 7.0, 0.5)
+        score_morpho = st.slider("Score morphologique", 0, 100, 75)
+    
+    with col2:
+        race = st.selectbox("Race", list(Config.RACES.keys()))
+        age = st.number_input("Âge (années)", 1, 15, 4)
+    
+    if st.button("🔮 Prédire production"):
+        pred = MachineLearning.predire_lait(score_mam, score_morpho, race, age)
+        
+        cols = st.columns(3)
+        cols[0].metric("Production/jour", f"{pred['litres_jour']} L")
+        cols[1].metric("Production/lactation", f"{pred['litres_lactation']} L")
+        cols[2].metric("Niveau", pred['niveau'])
+        
+        fig = px.bar(
+            x=["Potentiel estimé", "Moyenne race", "Record élite"],
+            y=[pred['litres_jour'], 1.2, 2.5],
+            color=[pred['niveau'], "Moyenne", "Élite"],
+            title="Comparaison production laitière (L/jour)"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# PAGE GESTION ÉLEVAGE (déjà fournie, mais je la recopie pour être complet)
+# -----------------------------------------------------------------------------
+def page_gestion_elevage():
+    st.title("🐑 Gestion des élevages")
+    
+    tab1, tab2, tab3 = st.tabs(["👨‍🌾 Éleveurs", "🏡 Élevages", "🐑 Brebis"])
+    
+    with tab1:
+        st.subheader("Liste des éleveurs")
+        
+        with st.expander("➕ Ajouter un éleveur"):
+            with st.form("form_eleveur"):
+                nom = st.text_input("Nom")
+                region = st.text_input("Région")
+                telephone = st.text_input("Téléphone")
+                email = st.text_input("Email")
+                if st.form_submit_button("Ajouter"):
+                    db.execute(
+                        "INSERT INTO eleveurs (user_id, nom, region, telephone, email) VALUES (?, ?, ?, ?, ?)",
+                        (st.session_state.user_id, nom, region, telephone, email)
+                    )
+                    st.success("Éleveur ajouté")
+                    st.rerun()
+        
+        eleveurs = db.fetchall(
+            "SELECT id, nom, region, telephone, email FROM eleveurs WHERE user_id=?",
+            (st.session_state.user_id,)
+        )
+        if eleveurs:
+            df = pd.DataFrame(eleveurs, columns=["ID", "Nom", "Région", "Téléphone", "Email"])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            
+            with st.expander("🗑️ Supprimer un éleveur"):
+                del_id = st.selectbox("Choisir l'éleveur", [f"{e[0]} - {e[1]}" for e in eleveurs])
+                if st.button("Supprimer"):
+                    eid = int(del_id.split(" - ")[0])
+                    count = db.fetchone("SELECT COUNT(*) FROM elevages WHERE eleveur_id=?", (eid,))[0]
+                    if count > 0:
+                        st.error("Cet éleveur a encore des élevages. Supprimez d'abord les élevages.")
+                    else:
+                        db.execute("DELETE FROM eleveurs WHERE id=?", (eid,))
+                        st.success("Éleveur supprimé")
+                        st.rerun()
+        else:
+            st.info("Aucun éleveur enregistré.")
+    
+    with tab2:
+        st.subheader("Liste des élevages")
+        
+        eleveurs_list = db.fetchall(
+            "SELECT id, nom FROM eleveurs WHERE user_id=?", (st.session_state.user_id,)
+        )
+        eleveurs_dict = {f"{e[0]} - {e[1]}": e[0] for e in eleveurs_list}
+        
+        if not eleveurs_dict:
+            st.warning("Vous devez d'abord ajouter un éleveur.")
+        else:
+            with st.expander("➕ Ajouter un élevage"):
+                with st.form("form_elevage"):
+                    eleveur_choice = st.selectbox("Éleveur", list(eleveurs_dict.keys()))
+                    nom_elevage = st.text_input("Nom de l'élevage")
+                    localisation = st.text_input("Localisation")
+                    superficie = st.number_input("Superficie (ha)", min_value=0.0, step=0.1)
+                    if st.form_submit_button("Ajouter"):
+                        eleveur_id = eleveurs_dict[eleveur_choice]
+                        db.execute(
+                            "INSERT INTO elevages (eleveur_id, nom, localisation, superficie) VALUES (?, ?, ?, ?)",
+                            (eleveur_id, nom_elevage, localisation, superficie)
+                        )
+                        st.success("Élevage ajouté")
+                        st.rerun()
+            
+            elevages = db.fetchall("""
+                SELECT e.id, e.nom, e.localisation, e.superficie, el.nom
+                FROM elevages e
+                JOIN eleveurs el ON e.eleveur_id = el.id
+                WHERE el.user_id=?
+            """, (st.session_state.user_id,))
+            if elevages:
+                df = pd.DataFrame(elevages, columns=["ID", "Nom", "Localisation", "Superficie", "Éleveur"])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                
+                with st.expander("🗑️ Supprimer un élevage"):
+                    del_id = st.selectbox("Choisir l'élevage", [f"{e[0]} - {e[1]}" for e in elevages])
+                    if st.button("Supprimer"):
+                        eid = int(del_id.split(" - ")[0])
+                        count = db.fetchone("SELECT COUNT(*) FROM brebis WHERE elevage_id=?", (eid,))[0]
+                        if count > 0:
+                            st.error("Cet élevage contient encore des brebis. Supprimez d'abord les brebis.")
+                        else:
+                            db.execute("DELETE FROM elevages WHERE id=?", (eid,))
+                            st.success("Élevage supprimé")
+                            st.rerun()
+            else:
+                st.info("Aucun élevage enregistré.")
+    
+    with tab3:
+        st.subheader("Liste des brebis")
+        
+        elevages_list = db.fetchall("""
+            SELECT e.id, e.nom, el.nom
+            FROM elevages e
+            JOIN eleveurs el ON e.eleveur_id = el.id
+            WHERE el.user_id=?
+        """, (st.session_state.user_id,))
+        elevages_dict = {f"{e[0]} - {e[1]} ({e[2]})": e[0] for e in elevages_list}
+        
+        if not elevages_dict:
+            st.warning("Vous devez d'abord ajouter un élevage.")
+        else:
+            with st.expander("➕ Ajouter une brebis"):
+                with st.form("form_brebis"):
+                    elevage_choice = st.selectbox("Élevage", list(elevages_dict.keys()))
+                    numero_id = st.text_input("Numéro d'identification")
+                    nom_brebis = st.text_input("Nom")
+                    race = st.selectbox("Race", list(Config.RACES.keys()))
+                    date_naissance = st.date_input("Date de naissance", value=datetime.today().date())
+                    etat_physio = st.selectbox("État physiologique", Config.ETATS_PHYSIO)
+                    photo_profil = st.file_uploader("Photo de profil", type=['jpg','png','jpeg'])
+                    photo_mamelle = st.file_uploader("Photo mamelle", type=['jpg','png','jpeg'])
+                    poids_vif = st.number_input("Poids vif (kg)", min_value=0.0, value=45.0, step=0.5)
+                    
+                    def img_to_base64(img_file):
+                        if img_file is not None:
+                            return base64.b64encode(img_file.read()).decode()
+                        return ""
+                    
+                    if st.form_submit_button("Ajouter"):
+                        elevage_id = elevages_dict[elevage_choice]
+                        db.execute("""
+                            INSERT INTO brebis 
+                            (elevage_id, numero_id, nom, race, date_naissance, etat_physio, photo_profil, photo_mamelle, poids_vif)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            elevage_id, numero_id, nom_brebis, race, 
+                            date_naissance.isoformat(), etat_physio,
+                            img_to_base64(photo_profil), img_to_base64(photo_mamelle), poids_vif
+                        ))
+                        st.success("Brebis ajoutée")
+                        st.rerun()
+            
+            brebis = db.fetchall("""
+                SELECT b.id, b.numero_id, b.nom, b.race, b.date_naissance, b.etat_physio, e.nom
+                FROM brebis b
+                JOIN elevages e ON b.elevage_id = e.id
+                JOIN eleveurs el ON e.eleveur_id = el.id
+                WHERE el.user_id=?
+            """, (st.session_state.user_id,))
+            if brebis:
+                df = pd.DataFrame(brebis, columns=["ID", "Numéro", "Nom", "Race", "Naissance", "État", "Élevage"])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                
+                with st.expander("🔧 Modifier / Supprimer une brebis"):
+                    choix = st.selectbox("Choisir une brebis", [f"{b[0]} - {b[1]} {b[2]}" for b in brebis])
+                    bid = int(choix.split(" - ")[0])
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Supprimer cette brebis"):
+                            db.execute("DELETE FROM brebis WHERE id=?", (bid,))
+                            st.success("Brebis supprimée")
+                            st.rerun()
+                    with col2:
+                        if st.button("Voir détails"):
+                            b = db.fetchone("SELECT * FROM brebis WHERE id=?", (bid,))
+                            st.json(dict(zip([col[0] for col in db.conn.execute("PRAGMA table_info(brebis)").fetchall()], b)))
+            else:
+                st.info("Aucune brebis enregistrée.")
+
+# -----------------------------------------------------------------------------
+# PAGE PRODUCTION LAITIÈRE
+# -----------------------------------------------------------------------------
+def page_production():
+    st.title("🥛 Production laitière et analyses biochimiques")
+    
+    tab1, tab2 = st.tabs(["📈 Suivi production", "🧪 Analyses biochimiques"])
+    
+    brebis_list = db.fetchall("""
+        SELECT b.id, b.numero_id, b.nom, e.nom
+        FROM brebis b
+        JOIN elevages e ON b.elevage_id = e.id
+        JOIN eleveurs el ON e.eleveur_id = el.id
+        WHERE el.user_id=?
+    """, (st.session_state.user_id,))
+    brebis_dict = {f"{b[0]} - {b[1]} {b[2]} ({b[3]})": b[0] for b in brebis_list}
+    
+    if not brebis_dict:
+        st.warning("Aucune brebis disponible. Veuillez d'abord ajouter des brebis.")
+        return
+    
+    with tab1:
+        st.subheader("Saisie d'une production")
+        
+        with st.form("form_prod"):
+            brebis_choice = st.selectbox("Brebis", list(brebis_dict.keys()))
+            date_prod = st.date_input("Date", value=datetime.today().date())
+            quantite = st.number_input("Quantité de lait (L)", min_value=0.0, step=0.1)
+            
+            if st.form_submit_button("Enregistrer production"):
+                brebis_id = brebis_dict[brebis_choice]
+                db.execute(
+                    "INSERT INTO productions (brebis_id, date, quantite) VALUES (?, ?, ?)",
+                    (brebis_id, date_prod.isoformat(), quantite)
+                )
+                st.success("Production enregistrée")
+                st.rerun()
+        
+        st.subheader("Évolution de la production")
+        
+        brebis_graph = st.selectbox("Choisir une brebis pour le graphique", list(brebis_dict.keys()), key="graph_brebis")
+        bid = brebis_dict[brebis_graph]
+        
+        data = db.fetchall(
+            "SELECT date, quantite FROM productions WHERE brebis_id=? ORDER BY date",
+            (bid,)
+        )
+        if data:
+            df = pd.DataFrame(data, columns=["Date", "Quantité (L)"])
+            df["Date"] = pd.to_datetime(df["Date"])
+            fig = px.line(df, x="Date", y="Quantité (L)", title=f"Production de {brebis_graph}")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Aucune donnée pour cette brebis.")
+        
+        st.subheader("Production par éleveur")
+        data_all = db.fetchall("""
+            SELECT el.nom AS eleveur, b.numero_id, p.date, p.quantite
+            FROM productions p
+            JOIN brebis b ON p.brebis_id = b.id
+            JOIN elevages e ON b.elevage_id = e.id
+            JOIN eleveurs el ON e.eleveur_id = el.id
+            WHERE el.user_id=?
+            ORDER BY p.date
+        """, (st.session_state.user_id,))
+        if data_all:
+            df_all = pd.DataFrame(data_all, columns=["Éleveur", "Brebis", "Date", "Quantité"])
+            df_all["Date"] = pd.to_datetime(df_all["Date"])
+            fig2 = px.line(df_all, x="Date", y="Quantité", color="Brebis", line_group="Brebis",
+                          title="Production par brebis")
+            st.plotly_chart(fig2, use_container_width=True)
+            
+            total_par_eleveur = df_all.groupby("Éleveur")["Quantité"].sum().reset_index()
+            fig3 = px.bar(total_par_eleveur, x="Éleveur", y="Quantité", title="Production totale par éleveur")
+            st.plotly_chart(fig3, use_container_width=True)
+        else:
+            st.info("Aucune donnée de production.")
+    
+    with tab2:
+        st.subheader("Analyses biochimiques du lait")
+        
+        with st.form("form_biochimie"):
+            brebis_choice2 = st.selectbox("Brebis", list(brebis_dict.keys()), key="bio_brebis")
+            date_bio = st.date_input("Date de l'analyse", value=datetime.today().date())
+            ph = st.number_input("pH", min_value=0.0, max_value=14.0, value=6.7, step=0.1)
+            mg = st.number_input("Matière grasse (g/L)", min_value=0.0, value=65.0, step=0.1)
+            proteine = st.number_input("Protéines (g/L)", min_value=0.0, value=55.0, step=0.1)
+            ag_satures = st.number_input("Acides gras saturés (g/L)", min_value=0.0, value=35.0, step=0.1)
+            densite = st.number_input("Densité", min_value=1.0, max_value=1.1, value=1.035, step=0.001, format="%.3f")
+            extrait_sec = st.number_input("Extrait sec (g/L)", min_value=0.0, value=180.0, step=0.1)
+            
+            if st.form_submit_button("Enregistrer analyse"):
+                brebis_id = brebis_dict[brebis_choice2]
+                existing = db.fetchone(
+                    "SELECT id FROM productions WHERE brebis_id=? AND date=?",
+                    (brebis_id, date_bio.isoformat())
+                )
+                if existing:
+                    db.execute("""
+                        UPDATE productions SET ph=?, mg=?, proteine=?, ag_satures=?, densite=?, extrait_sec=?
+                        WHERE id=?
+                    """, (ph, mg, proteine, ag_satures, densite, extrait_sec, existing[0]))
+                else:
+                    db.execute("""
+                        INSERT INTO productions 
+                        (brebis_id, date, ph, mg, proteine, ag_satures, densite, extrait_sec)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (brebis_id, date_bio.isoformat(), ph, mg, proteine, ag_satures, densite, extrait_sec))
+                st.success("Analyse enregistrée")
+                st.rerun()
+        
+        st.subheader("Dernières analyses enregistrées")
+        data_bio = db.fetchall("""
+            SELECT b.numero_id, b.nom, p.date, p.ph, p.mg, p.proteine, p.ag_satures, p.densite, p.extrait_sec
+            FROM productions p
+            JOIN brebis b ON p.brebis_id = b.id
+            JOIN elevages e ON b.elevage_id = e.id
+            JOIN eleveurs el ON e.eleveur_id = el.id
+            WHERE el.user_id=? AND (p.ph IS NOT NULL OR p.mg IS NOT NULL)
+            ORDER BY p.date DESC LIMIT 20
+        """, (st.session_state.user_id,))
+        if data_bio:
+            df_bio = pd.DataFrame(data_bio, columns=["Numéro", "Nom", "Date", "pH", "MG", "Protéines", "AGS", "Densité", "Extrait sec"])
+            st.dataframe(df_bio, use_container_width=True, hide_index=True)
+        else:
+            st.info("Aucune analyse biochimique.")
+
+# -----------------------------------------------------------------------------
+# PAGE GÉNOMIQUE AVANCÉE
+# -----------------------------------------------------------------------------
+def page_genomique_avancee():
+    st.title("🧬 Génomique avancée")
+    
+    tab1, tab2, tab3 = st.tabs(["🔍 BLAST", "🧬 SNPs d'intérêt", "📊 GWAS"])
+    
+    brebis_list = db.fetchall("""
+        SELECT b.id, b.numero_id, b.nom
+        FROM brebis b
+        JOIN elevages e ON b.elevage_id = e.id
+        JOIN eleveurs el ON e.eleveur_id = el.id
+        WHERE el.user_id=?
+    """, (st.session_state.user_id,))
+    brebis_dict = {f"{b[0]} - {b[1]} {b[2]}": b[0] for b in brebis_list}
+    
+    with tab1:
+        st.subheader("Alignement BLAST sur NCBI")
+        
+        if brebis_dict:
+            blast_brebis = st.selectbox("Sélectionner une brebis (pour utiliser sa séquence FASTA)", 
+                                        ["Nouvelle séquence"] + list(brebis_dict.keys()))
+            if blast_brebis != "Nouvelle séquence":
+                bid = brebis_dict[blast_brebis]
+                seq = db.fetchone("SELECT sequence_fasta FROM brebis WHERE id=?", (bid,))
+                if seq and seq[0]:
+                    default_seq = seq[0]
+                else:
+                    default_seq = ""
+            else:
+                default_seq = ""
+        else:
+            default_seq = ""
+        
+        seq_input = st.text_area("Séquence FASTA", value=default_seq, height=150)
+        database = st.selectbox("Base de données", ["nr", "nt", "refseq_rna", "refseq_protein"])
+        
+        if st.button("Lancer BLAST"):
+            if not seq_input:
+                st.error("Veuillez entrer une séquence.")
+            else:
+                with st.spinner("Recherche BLAST en cours..."):
+                    try:
+                        url = "https://blast.ncbi.nlm.nih.gov/Blast.cgi"
+                        params = {
+                            "CMD": "Put",
+                            "PROGRAM": "blastn",
+                            "DATABASE": database,
+                            "QUERY": seq_input,
+                            "FORMAT_TYPE": "JSON2"
+                        }
+                        resp = requests.post(url, data=params)
+                        st.warning("Le BLAST en ligne est complexe à intégrer. Pour une démonstration, nous affichons un résultat factice.")
+                        time.sleep(2)
+                        st.success("BLAST terminé (simulation)")
+                        
+                        mock_results = [
+                            {"accession": "XM_004012345.1", "description": "Ovis aries BMP15 mRNA", "score": 1234, "evalue": 1e-150},
+                            {"accession": "NM_001009345.1", "description": "Ovis aries MSTN mRNA", "score": 1100, "evalue": 1e-140},
+                        ]
+                        df_mock = pd.DataFrame(mock_results)
+                        st.dataframe(df_mock)
+                        
+                        if st.button("Enregistrer ce résultat"):
+                            st.info("Fonctionnalité à implémenter (sauvegarde en base)")
+                    except Exception as e:
+                        st.error(f"Erreur BLAST: {e}")
+    
+    with tab2:
+        st.subheader("SNPs d'intérêt économique")
+        
+        st.markdown("**Gènes d'intérêt et SNPs associés**")
+        df_genes = pd.DataFrame([
+            {"Gène": sym, "Nom": info["nom"], "Effet": info["effet"]}
+            for sym, info in Config.GENES_ECONOMIQUES.items()
+        ])
+        st.dataframe(df_genes, use_container_width=True, hide_index=True)
+        
+        if brebis_dict:
+            selected = st.selectbox("Charger les SNPs d'une brebis", list(brebis_dict.keys()))
+            bid = brebis_dict[selected]
+            variants = db.fetchone("SELECT variants_snps FROM brebis WHERE id=?", (bid,))
+            if variants and variants[0]:
+                try:
+                    snps = json.loads(variants[0])
+                    st.json(snps)
+                except:
+                    st.info("Les SNPs ne sont pas au format JSON valide.")
+            else:
+                st.info("Aucun SNP enregistré pour cette brebis.")
+            
+            with st.expander("Ajouter / modifier les SNPs"):
+                snps_json = st.text_area("SNPs au format JSON (ex: {'BMP15': 'AA', 'MSTN': 'GG'})", height=150)
+                if st.button("Enregistrer"):
+                    db.execute("UPDATE brebis SET variants_snps=? WHERE id=?", (snps_json, bid))
+                    st.success("SNPs enregistrés")
+                    st.rerun()
+    
+    with tab3:
+        st.subheader("Analyse d'association GWAS")
+        st.markdown("""
+        Cette section permet de réaliser une étude d'association pangénomique simplifiée.
+        Vous devez fournir deux fichiers CSV :
+        - **Génotypes** : avec une colonne `brebis_id` et une colonne par SNP (valeurs 0,1,2 pour le dosage allélique).
+        - **Phénotypes** : avec les colonnes `brebis_id` et un trait quantitatif (ex: production laitière, poids...).
+        """)
+        
+        upload_geno = st.file_uploader("Fichier génotypes (CSV)", type="csv", key="geno")
+        upload_pheno = st.file_uploader("Fichier phénotypes (CSV)", type="csv", key="pheno")
+        
+        if upload_geno and upload_pheno:
+            try:
+                df_geno = pd.read_csv(upload_geno)
+                df_pheno = pd.read_csv(upload_pheno)
+                
+                if 'brebis_id' not in df_geno.columns or 'brebis_id' not in df_pheno.columns:
+                    st.error("Les fichiers doivent contenir une colonne 'brebis_id'.")
+                else:
+                    df_merged = pd.merge(df_geno, df_pheno, on='brebis_id')
+                    trait_col = st.selectbox("Sélectionner le trait phénotypique", 
+                                             [c for c in df_pheno.columns if c != 'brebis_id'])
+                    
+                    snp_cols = [c for c in df_geno.columns if c != 'brebis_id' and df_geno[c].dtype in ['int64', 'float64']]
+                    
+                    if len(snp_cols) == 0:
+                        st.error("Aucune colonne SNP numérique trouvée.")
+                    else:
+                        st.write(f"Nombre de SNPs analysés : {len(snp_cols)}")
+                        
+                        results = []
+                        pbar = st.progress(0)
+                        for i, snp in enumerate(snp_cols):
+                            X = df_merged[snp].values
+                            y = df_merged[trait_col].values
+                            X = sm.add_constant(X)
+                            model = sm.OLS(y, X).fit()
+                            p_value = model.pvalues[1]
+                            beta = model.params[1]
+                            results.append({
+                                'SNP': snp,
+                                'Beta': beta,
+                                'P_value': p_value,
+                                '-log10(p)': -np.log10(p_value) if p_value > 0 else 10
+                            })
+                            pbar.progress((i+1)/len(snp_cols))
+                        
+                        df_res = pd.DataFrame(results)
+                        
+                        fig = px.scatter(df_res, x='SNP', y='-log10(p)', 
+                                         title="Manhattan plot",
+                                         labels={'-log10(p)': '-log10(p-value)'},
+                                         hover_data=['Beta', 'P_value'])
+                        fig.add_hline(y=-np.log10(0.05/len(snp_cols)), line_dash="dash", 
+                                      annotation_text="Bonferroni threshold")
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        sig = df_res[df_res['P_value'] < 0.05]
+                        if not sig.empty:
+                            st.subheader("SNPs suggestifs (p < 0.05)")
+                            st.dataframe(sig.sort_values('P_value'), use_container_width=True, hide_index=True)
+                        else:
+                            st.info("Aucun SNP significatif au seuil de 0.05.")
+            except Exception as e:
+                st.error(f"Erreur lors de l'analyse : {e}")
 
 # -----------------------------------------------------------------------------
 # PAGE PHOTOGRAMMÉTRIE AMÉLIORÉE
@@ -530,7 +1295,6 @@ class GenomicAnalyzer:
 def page_analyse():
     st.title("📸 Analyse Photogrammétrique")
     
-    # Récupérer les brebis de l'utilisateur
     brebis_list = db.fetchall("""
         SELECT b.id, b.numero_id, b.nom, e.nom
         FROM brebis b
@@ -547,7 +1311,6 @@ def page_analyse():
     selected_brebis = st.selectbox("Sélectionner la brebis", list(brebis_dict.keys()))
     brebis_id = brebis_dict[selected_brebis]
     
-    # Récupération des infos de la brebis (âge, etc.)
     brebis_info = db.fetchone("SELECT date_naissance, race FROM brebis WHERE id=?", (brebis_id,))
     if brebis_info:
         date_naiss = datetime.strptime(brebis_info[0], "%Y-%m-%d").date()
@@ -573,7 +1336,6 @@ def page_analyse():
     with tab1:
         st.subheader("Mesures corporelles")
         
-        # Upload de plusieurs photos
         uploaded_files = st.file_uploader("Photos de profil (plusieurs acceptées)", 
                                           type=['jpg','png','jpeg'], accept_multiple_files=True)
         if uploaded_files:
@@ -589,7 +1351,6 @@ def page_analyse():
                                  list(Config.ETALONS.keys()),
                                  format_func=lambda x: Config.ETALONS[x]['nom'])
         with col2:
-            # Choix de l'âge (soit dentition soit mois)
             mode_age = st.radio("Mode d'âge", ["Mois", "Dentition"])
             if mode_age == "Mois":
                 age_saisi = st.number_input("Âge (mois)", min_value=0, value=age_mois)
@@ -618,16 +1379,13 @@ def page_analyse():
             ))
             st.plotly_chart(fig, use_container_width=True)
             
-            # Diagnostic simple basé sur les photos (simulation)
             if uploaded_files:
                 st.subheader("🔍 Diagnostic visuel")
                 st.info("Analyse d'image simulée : pas de signes de maladie détectés.")
-                # Ici on pourrait appeler un modèle, mais on reste simple.
     
     with tab2:
         st.subheader("Scoring mamelles")
         
-        # Upload photo mamelle
         mamelle_file = st.file_uploader("Vue arrière mamelles", type=['jpg','png','jpeg'], key="mamelle_img")
         if mamelle_file:
             img_mam = Image.open(mamelle_file)
@@ -653,7 +1411,6 @@ def page_analyse():
             else:
                 st.warning("⚠️ Conformation à améliorer")
             
-            # Diagnostic mamelle simulé
             if mamelle_file:
                 st.subheader("🔍 Diagnostic mammaire")
                 if score < 6 or forme == "Bifide" or attache == "Pendante":
@@ -662,12 +1419,11 @@ def page_analyse():
                     st.success("Aspect sain (simulation).")
 
 # -----------------------------------------------------------------------------
-# NOUVELLE PAGE SANTÉ
+# PAGE SANTÉ
 # -----------------------------------------------------------------------------
 def page_sante():
     st.title("🏥 Suivi sanitaire et vaccinal")
     
-    # Récupérer les brebis
     brebis_list = db.fetchall("""
         SELECT b.id, b.numero_id, b.nom, e.nom
         FROM brebis b
@@ -689,7 +1445,6 @@ def page_sante():
     with tab1:
         st.subheader("Carnet de vaccination")
         
-        # Formulaire d'ajout
         with st.form("form_vaccin"):
             date_vaccin = st.date_input("Date du vaccin", value=datetime.today().date())
             vaccin = st.text_input("Nom du vaccin")
@@ -702,7 +1457,6 @@ def page_sante():
                 st.success("Vaccin enregistré")
                 st.rerun()
         
-        # Affichage historique
         vaccins = db.fetchall(
             "SELECT date_vaccin, vaccin, rappel FROM vaccinations WHERE brebis_id=? ORDER BY date_vaccin DESC",
             (bid,)
@@ -740,7 +1494,7 @@ def page_sante():
             st.info("Aucun soin enregistré.")
 
 # -----------------------------------------------------------------------------
-# NOUVELLE PAGE REPRODUCTION
+# PAGE REPRODUCTION
 # -----------------------------------------------------------------------------
 def page_reproduction():
     st.title("🤰 Gestion de la reproduction")
@@ -809,14 +1563,13 @@ def page_reproduction():
             df = pd.DataFrame(saillies, columns=["Date", "Bélier", "Méthode", "Résultat"])
             st.dataframe(df, use_container_width=True, hide_index=True)
             
-            # Prédiction de mise bas pour la dernière saillie avec résultat "Gestante"
             last_gest = db.fetchone(
                 "SELECT date_saillie FROM saillies WHERE brebis_id=? AND resultat='Gestante' ORDER BY date_saillie DESC",
                 (bid,)
             )
             if last_gest:
                 date_saillie = datetime.strptime(last_gest[0], "%Y-%m-%d").date()
-                date_mb = date_saillie + timedelta(days=150)  # Durée moyenne gestation
+                date_mb = date_saillie + timedelta(days=150)
                 st.success(f"📅 Mise bas prévue autour du : {date_mb.strftime('%d/%m/%Y')}")
     
     with tab3:
@@ -843,7 +1596,7 @@ def page_reproduction():
             st.dataframe(df, use_container_width=True, hide_index=True)
 
 # -----------------------------------------------------------------------------
-# NOUVELLE PAGE NUTRITION AVANCÉE
+# PAGE NUTRITION AVANCÉE
 # -----------------------------------------------------------------------------
 def page_nutrition_avancee():
     st.title("🌾 Nutrition avancée et formulation")
@@ -853,7 +1606,6 @@ def page_nutrition_avancee():
     with tab1:
         st.subheader("Gestion des aliments")
         
-        # Formulaire d'ajout d'aliment
         with st.expander("➕ Ajouter un aliment"):
             with st.form("form_aliment"):
                 nom = st.text_input("Nom de l'aliment")
@@ -873,13 +1625,11 @@ def page_nutrition_avancee():
                     except sqlite3.IntegrityError:
                         st.error("Cet aliment existe déjà.")
         
-        # Liste des aliments
         aliments = db.fetchall("SELECT id, nom, type, uem, pdin, ms, prix_kg FROM aliments")
         if aliments:
             df_alim = pd.DataFrame(aliments, columns=["ID", "Nom", "Type", "UEM", "PDIN", "MS%", "Prix DA/kg"])
             st.dataframe(df_alim, use_container_width=True, hide_index=True)
             
-            # Modification de prix (flexibilité)
             with st.expander("💰 Modifier un prix"):
                 choix = st.selectbox("Choisir un aliment", [f"{a[0]} - {a[1]}" for a in aliments])
                 aid = int(choix.split(" - ")[0])
@@ -894,14 +1644,11 @@ def page_nutrition_avancee():
     with tab2:
         st.subheader("Rations types par état physiologique")
         
-        # Sélection d'un état
         etat_physio = st.selectbox("État physiologique", Config.ETATS_PHYSIO)
         
-        # Vérifier si une ration existe déjà pour cet état
         ration_existante = db.fetchone("SELECT id, nom, description FROM rations WHERE etat_physio=?", (etat_physio,))
         if ration_existante:
             st.success(f"Ration existante : {ration_existante[1]}")
-            # Afficher composition
             compo = db.fetchall("""
                 SELECT a.nom, rc.quantite_kg, a.prix_kg
                 FROM ration_composition rc
@@ -919,19 +1666,15 @@ def page_nutrition_avancee():
         else:
             st.info("Aucune ration définie pour cet état.")
         
-        # Formulaire pour créer/modifier une ration
         with st.expander("⚙️ Configurer une ration pour cet état"):
-            # Récupérer les aliments disponibles
             aliments = db.fetchall("SELECT id, nom FROM aliments")
             if not aliments:
                 st.warning("Ajoutez d'abord des aliments.")
             else:
-                # Si une ration existe déjà, on la modifie, sinon on crée
                 if ration_existante:
                     ration_id = ration_existante[0]
                     st.markdown("**Modifier la ration existante**")
                 else:
-                    # Créer une nouvelle ration
                     nom_ration = st.text_input("Nom de la ration", value=f"Ration {etat_physio}")
                     desc = st.text_area("Description")
                     if st.button("Créer la ration"):
@@ -944,13 +1687,11 @@ def page_nutrition_avancee():
                     ration_id = None
                 
                 if ration_id:
-                    # Ajouter des aliments à la ration
                     st.subheader("Ajouter un aliment à cette ration")
                     aliment_choix = st.selectbox("Choisir un aliment", [f"{a[0]} - {a[1]}" for a in aliments])
                     aid = int(aliment_choix.split(" - ")[0])
                     quantite = st.number_input("Quantité (kg/jour)", min_value=0.0, step=0.1, format="%.2f")
                     if st.button("Ajouter à la ration"):
-                        # Vérifier si déjà présent
                         existing = db.fetchone(
                             "SELECT id FROM ration_composition WHERE ration_id=? AND aliment_id=?",
                             (ration_id, aid)
@@ -968,7 +1709,6 @@ def page_nutrition_avancee():
                         st.success("Aliment ajouté/modifié")
                         st.rerun()
                     
-                    # Supprimer un aliment
                     with st.expander("🗑️ Supprimer un aliment de la ration"):
                         compo = db.fetchall("""
                             SELECT rc.id, a.nom FROM ration_composition rc
@@ -986,7 +1726,6 @@ def page_nutrition_avancee():
     with tab3:
         st.subheader("Calcul de ration personnalisée")
         
-        # Sélection d'une brebis pour adapter les besoins
         brebis_list = db.fetchall("""
             SELECT b.id, b.numero_id, b.nom, b.etat_physio, b.poids_vif
             FROM brebis b
@@ -1019,17 +1758,14 @@ def page_nutrition_avancee():
             
             lactation = st.number_input("Production laitière (L/j)", min_value=0.0, value=0.0, step=0.5)
             
-            # Calcul des besoins
             besoins = OvinScience.besoins_nutritionnels(poids, etat, lactation)
             st.info(f"**Besoins journaliers** : UEM = {besoins['uem']} MJ, PDIN = {besoins['pdin']} g, MS = {besoins['ms']} kg")
             
-            # Récupérer les aliments disponibles
             aliments = db.fetchall("SELECT id, nom, type, uem, pdin, ms, prix_kg FROM aliments")
             if not aliments:
                 st.warning("Ajoutez d'abord des aliments.")
             else:
                 st.subheader("Composition de la ration")
-                # Permettre de choisir plusieurs aliments avec quantités
                 ration_temp = {}
                 for alim in aliments:
                     with st.expander(f"{alim[1]} ({alim[2]}) - {alim[6]} DA/kg"):
@@ -1058,7 +1794,6 @@ def page_nutrition_avancee():
                     
                     st.metric("Coût journalier", f"{total_prix:.2f} DA")
                     
-                    # Vérification équilibre
                     if total_uem < besoins['uem'] * 0.9:
                         st.warning("⚠️ Apport énergétique insuffisant")
                     elif total_uem > besoins['uem'] * 1.1:
@@ -1076,9 +1811,75 @@ def page_nutrition_avancee():
             st.info("Aucune brebis disponible. Vous pouvez utiliser 'Personnalisé'.")
 
 # -----------------------------------------------------------------------------
-# PAGE EXPORT (déjà définie)
+# PAGE EXPORT
 # -----------------------------------------------------------------------------
-# (La fonction page_export a été donnée précédemment, nous la gardons)
+def page_export():
+    st.title("📤 Export des données")
+    st.markdown("Téléchargez l'ensemble de vos données au format CSV ou Excel pour les partager avec votre professeur.")
+    
+    format_export = st.radio("Format", ["CSV", "Excel"])
+    
+    if st.button("Générer l'export"):
+        tables = ["eleveurs", "elevages", "brebis", "productions", "mesures_morpho", "mesures_mamelles", "composition_corporelle",
+                  "vaccinations", "soins", "chaleurs", "saillies", "mises_bas", "aliments", "rations", "ration_composition"]
+        data_frames = {}
+        
+        for table in tables:
+            if table == "eleveurs":
+                df = pd.read_sql_query(f"SELECT * FROM {table} WHERE user_id=?", db.conn, params=(st.session_state.user_id,))
+            elif table == "elevages":
+                df = pd.read_sql_query("""
+                    SELECT e.* FROM elevages e
+                    JOIN eleveurs el ON e.eleveur_id = el.id
+                    WHERE el.user_id=?
+                """, db.conn, params=(st.session_state.user_id,))
+            elif table in ["brebis", "productions", "vaccinations", "soins", "chaleurs", "saillies", "mises_bas"]:
+                df = pd.read_sql_query(f"""
+                    SELECT t.* FROM {table} t
+                    JOIN brebis b ON t.brebis_id = b.id
+                    JOIN elevages e ON b.elevage_id = e.id
+                    JOIN eleveurs el ON e.eleveur_id = el.id
+                    WHERE el.user_id=?
+                """, db.conn, params=(st.session_state.user_id,))
+            elif table in ["mesures_morpho", "mesures_mamelles", "composition_corporelle"]:
+                df = pd.read_sql_query(f"""
+                    SELECT t.* FROM {table} t
+                    JOIN brebis b ON t.brebis_id = b.id
+                    JOIN elevages e ON b.elevage_id = e.id
+                    JOIN eleveurs el ON e.eleveur_id = el.id
+                    WHERE el.user_id=?
+                """, db.conn, params=(st.session_state.user_id,))
+            else:
+                # tables non liées à un user (aliments, rations, etc.) : on prend tout
+                df = pd.read_sql_query(f"SELECT * FROM {table}", db.conn)
+            
+            data_frames[table] = df
+        
+        if format_export == "Excel":
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                for name, df in data_frames.items():
+                    df.to_excel(writer, sheet_name=name, index=False)
+            output.seek(0)
+            st.download_button(
+                label="Télécharger Excel",
+                data=output,
+                file_name=f"ovin_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED) as zip_file:
+                for name, df in data_frames.items():
+                    csv_data = df.to_csv(index=False).encode('utf-8')
+                    zip_file.writestr(f"{name}.csv", csv_data)
+            zip_buffer.seek(0)
+            st.download_button(
+                label="Télécharger ZIP (CSV)",
+                data=zip_buffer,
+                file_name=f"ovin_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                mime="application/zip"
+            )
 
 # -----------------------------------------------------------------------------
 # SIDEBAR ET MAIN
@@ -1181,6 +1982,8 @@ def main():
 if __name__ == "__main__":
     # Initialisation de la base de données et de la session
     db = get_database()
+    genomic_analyzer = GenomicAnalyzer()
+    
     if 'user_id' not in st.session_state:
         st.session_state.user_id = None
         st.session_state.current_page = "login"
@@ -1192,5 +1995,43 @@ if __name__ == "__main__":
         layout="wide",
         initial_sidebar_state="expanded"
     )
+    
+    # CSS personnalisé (repris du code original)
+    st.markdown("""
+    <style>
+        .main-header {
+            font-size: 2.5rem;
+            font-weight: bold;
+            color: #2E7D32;
+            text-align: center;
+        }
+        .sub-header {
+            font-size: 1.2rem;
+            color: #666;
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        .metric-card {
+            background-color: #f0f2f6;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+        }
+        .gene-card {
+            background-color: #e3f2fd;
+            border-left: 5px solid #00838F;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        .meat-card {
+            background-color: #fff3e0;
+            border-left: 5px solid #FF6F00;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
     
     main()

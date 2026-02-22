@@ -611,117 +611,163 @@ def page_dashboard():
                     st.session_state.current_page = page
                     st.rerun()
 
-def page_genomique():
-    st.title("🧬 Analyse Génomique - NCBI/GenBank")
+def page_genomique_avancee():
+    st.title("🧬 Génomique avancée")
     
-    tab1, tab2, tab3 = st.tabs(["🔍 Recherche Gène", "🏆 Profil Race", "🧪 SNPs/QTN"])
+    tab1, tab2, tab3 = st.tabs(["🔍 BLAST", "🧬 SNPs d'intérêt", "📊 GWAS"])
+    
+    brebis_list = db.fetchall("""
+        SELECT b.id, b.numero_id, b.nom
+        FROM brebis b
+        JOIN elevages e ON b.elevage_id = e.id
+        JOIN eleveurs el ON e.eleveur_id = el.id
+        WHERE el.user_id=?
+    """, (st.session_state.user_id,))
+    brebis_dict = {f"{b[0]} - {b[1]} {b[2]}": b[0] for b in brebis_list}
     
     with tab1:
-        st.subheader("Recherche dans NCBI Gene")
+        st.subheader("Alignement BLAST sur NCBI")
         
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            gene_search = st.text_input("Nom du gène", "BMP15", 
-                                       help="Ex: BMP15, MSTN, DGAT1, CAST...")
-        with col2:
-            organism = st.selectbox("Organisme", ["Ovis aries (Mouton)", "Capra hircus (Chèvre)", "Bos taurus (Bovin)"])
+        default_seq = ""
+        if brebis_dict:
+            blast_brebis = st.selectbox("Sélectionner une brebis (pour utiliser sa séquence FASTA)", 
+                                        ["Nouvelle séquence"] + list(brebis_dict.keys()))
+            if blast_brebis != "Nouvelle séquence":
+                bid = brebis_dict[blast_brebis]
+                seq_result = db.fetchone("SELECT sequence_fasta FROM brebis WHERE id=?", (bid,))
+                if seq_result and seq_result[0]:
+                    default_seq = seq_result[0]
         
-        if st.button("🔍 Rechercher dans NCBI", use_container_width=True):
-            results = genomic_analyzer.ncbi.search_gene(gene_search, "Ovis aries")
-            
-            if results:
-                for gene in results:
-                    with st.container():
-                        st.markdown(f"""
-                        <div class="gene-card">
-                            <h4>🧬 {gene['name']} (ID: {gene['gene_id']})</h4>
-                            <p><strong>Description:</strong> {gene['description']}</p>
-                            <p><strong>Chromosome:</strong> {gene['chromosome']} | <strong>Position:</strong> {gene['map_location']}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        local_info = Config.GENES_ECONOMIQUES.get(gene_search.upper())
-                        if local_info:
-                            st.info(f"**Effet économique:** {local_info['effet']}")
+        seq_input = st.text_area("Séquence FASTA", value=default_seq, height=150)
+        database = st.selectbox("Base de données", ["nr", "nt", "refseq_rna", "refseq_protein"])
+        
+        if st.button("Lancer BLAST"):
+            if not seq_input:
+                st.error("Veuillez entrer une séquence.")
             else:
-                local = Config.GENES_ECONOMIQUES.get(gene_search.upper())
-                if local:
-                    st.success("Informations depuis la base locale GenApAgiE")
-                    st.json(local)
-                else:
-                    st.warning("Gène non trouvé. Essayez: BMP15, MSTN, DGAT1, CAST, CAPN1...")
+                with st.spinner("Recherche BLAST en cours..."):
+                    try:
+                        url = "https://blast.ncbi.nlm.nih.gov/Blast.cgi"
+                        params = {
+                            "CMD": "Put",
+                            "PROGRAM": "blastn",
+                            "DATABASE": database,
+                            "QUERY": seq_input,
+                            "FORMAT_TYPE": "JSON2"
+                        }
+                        requests.post(url, data=params)
+                        st.warning("Le BLAST en ligne est complexe à intégrer. Pour une démonstration, nous affichons un résultat factice.")
+                        time.sleep(2)
+                        st.success("BLAST terminé (simulation)")
+                        
+                        mock_results = [
+                            {"accession": "XM_004012345.1", "description": "Ovis aries BMP15 mRNA", "score": 1234, "evalue": 1e-150},
+                            {"accession": "NM_001009345.1", "description": "Ovis aries MSTN mRNA", "score": 1100, "evalue": 1e-140},
+                        ]
+                        df_mock = pd.DataFrame(mock_results)
+                        st.dataframe(df_mock)
+                        
+                        if st.button("Enregistrer ce résultat"):
+                            st.info("Fonctionnalité à implémenter (sauvegarde en base)")
+                    except Exception as e:
+                        st.error(f"Erreur BLAST: {e}")
     
     with tab2:
-        st.subheader("Profil Génétique par Race")
+        st.subheader("SNPs d'intérêt économique")
         
-        race_selected = st.selectbox("Sélectionner une race", list(Config.RACES.keys()))
-        
-        if st.button("🧬 Analyser le profil génétique"):
-            analysis = genomic_analyzer.analyze_race_profile(race_selected)
-            
-            fig = go.Figure(data=go.Scatterpolar(
-                r=[analysis['score_reproduction'], analysis['score_croissance'], 
-                   analysis['score_lait'], analysis['score_reproduction']],
-                theta=['Reproduction', 'Croissance/Viande', 'Lait', 'Reproduction'],
-                fill='toself',
-                name=race_selected
-            ))
-            fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-                showlegend=False,
-                title=f"Profil Génétique: {race_selected}"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.subheader("Gènes Majeurs")
-            for gene in analysis['genes']:
-                with st.expander(f"🧬 {gene['symbole']} - {gene['nom'][:40]}..."):
-                    st.write(f"**Effet:** {gene['effet']}")
-                    st.write(f"**Chromosome:** {gene['chromosome']}")
-            
-            if analysis['recommandations']:
-                st.success("### ✅ Recommandations")
-                for rec in analysis['recommandations']:
-                    st.write(rec)
-    
-    with tab3:
-        st.subheader("Base de données SNPs et QTN économiques")
-        
-        categorie = st.selectbox("Filtrer par catégorie", 
-                                ["Tous", "Reproduction", "Croissance/Viande", "Lait", "Résistance", "Qualité viande"])
-        
-        genes_filtres = []
-        for sym, info in Config.GENES_ECONOMIQUES.items():
-            if categorie == "Tous":
-                genes_filtres.append((sym, info))
-            elif categorie == "Reproduction" and any(x in sym for x in ["BMP", "GDF"]):
-                genes_filtres.append((sym, info))
-            elif categorie == "Croissance/Viande" and any(x in sym for x in ["MSTN", "IGF", "GH"]):
-                genes_filtres.append((sym, info))
-            elif categorie == "Lait" and any(x in sym for x in ["LALBA", "CSN", "DGAT", "SCD"]):
-                genes_filtres.append((sym, info))
-            elif categorie == "Résistance" and any(x in sym for x in ["TLR", "MHC", "PRNP"]):
-                genes_filtres.append((sym, info))
-            elif categorie == "Qualité viande" and any(x in sym for x in ["CAST", "CAPN", "FABP"]):
-                genes_filtres.append((sym, info))
-        
+        st.markdown("**Gènes d'intérêt et SNPs associés**")
         df_genes = pd.DataFrame([
-            {
-                "Symbole": sym,
-                "Nom": info["nom"][:50] + "...",
-                "Chr": info["chr"],
-                "Effet": info["effet"][:60] + "...",
-                "Type": "QTN" if sym in ["BMP15", "MSTN", "DGAT1", "BMPR1B"] else "SNP"
-            }
-            for sym, info in genes_filtres
+            {"Gène": sym, "Nom": info["nom"], "Effet": info["effet"]}
+            for sym, info in Config.GENES_ECONOMIQUES.items()
         ])
-        
         st.dataframe(df_genes, use_container_width=True, hide_index=True)
         
-        gene_detail = st.selectbox("Voir détails", [sym for sym, _ in genes_filtres])
-        if gene_detail:
-            info = Config.GENES_ECONOMIQUES[gene_detail]
-            st.json(info)
+        if brebis_dict:
+            selected = st.selectbox("Charger les SNPs d'une brebis", list(brebis_dict.keys()))
+            bid = brebis_dict[selected]
+            variants = db.fetchone("SELECT variants_snps FROM brebis WHERE id=?", (bid,))
+            if variants and variants[0]:
+                try:
+                    snps = json.loads(variants[0])
+                    st.json(snps)
+                except:
+                    st.info("Les SNPs ne sont pas au format JSON valide.")
+            else:
+                st.info("Aucun SNP enregistré pour cette brebis.")
+            
+            with st.expander("Ajouter / modifier les SNPs"):
+                snps_json = st.text_area("SNPs au format JSON (ex: {'BMP15': 'AA', 'MSTN': 'GG'})", height=150)
+                if st.button("Enregistrer"):
+                    db.execute("UPDATE brebis SET variants_snps=? WHERE id=?", (snps_json, bid))
+                    st.success("SNPs enregistrés")
+                    st.rerun()
+    
+    with tab3:
+        st.subheader("Analyse d'association GWAS")
+        st.markdown("""
+        Cette section permet de réaliser une étude d'association pangénomique simplifiée.
+        Vous devez fournir deux fichiers CSV :
+        - **Génotypes** : avec une colonne `brebis_id` et une colonne par SNP (valeurs 0,1,2 pour le dosage allélique).
+        - **Phénotypes** : avec les colonnes `brebis_id` et un trait quantitatif (ex: production laitière, poids...).
+        """)
+        
+        upload_geno = st.file_uploader("Fichier génotypes (CSV)", type="csv", key="geno")
+        upload_pheno = st.file_uploader("Fichier phénotypes (CSV)", type="csv", key="pheno")
+        
+        if upload_geno and upload_pheno:
+            try:
+                df_geno = pd.read_csv(upload_geno)
+                df_pheno = pd.read_csv(upload_pheno)
+                
+                if 'brebis_id' not in df_geno.columns or 'brebis_id' not in df_pheno.columns:
+                    st.error("Les fichiers doivent contenir une colonne 'brebis_id'.")
+                else:
+                    df_merged = pd.merge(df_geno, df_pheno, on='brebis_id')
+                    trait_col = st.selectbox("Sélectionner le trait phénotypique", 
+                                             [c for c in df_pheno.columns if c != 'brebis_id'])
+                    
+                    snp_cols = [c for c in df_geno.columns if c != 'brebis_id' and df_geno[c].dtype in ['int64', 'float64']]
+                    
+                    if len(snp_cols) == 0:
+                        st.error("Aucune colonne SNP numérique trouvée.")
+                    else:
+                        st.write(f"Nombre de SNPs analysés : {len(snp_cols)}")
+                        
+                        results = []
+                        pbar = st.progress(0)
+                        for i, snp in enumerate(snp_cols):
+                            X = df_merged[snp].values
+                            y = df_merged[trait_col].values
+                            X = sm.add_constant(X)
+                            model = sm.OLS(y, X).fit()
+                            p_value = model.pvalues[1]
+                            beta = model.params[1]
+                            results.append({
+                                'SNP': snp,
+                                'Beta': beta,
+                                'P_value': p_value,
+                                '-log10(p)': -np.log10(p_value) if p_value > 0 else 10
+                            })
+                            pbar.progress((i+1)/len(snp_cols))
+                        
+                        df_res = pd.DataFrame(results)
+                        
+                        fig = px.scatter(df_res, x='SNP', y='-log10(p)', 
+                                         title="Manhattan plot",
+                                         labels={'-log10(p)': '-log10(p-value)'},
+                                         hover_data=['Beta', 'P_value'])
+                        fig.add_hline(y=-np.log10(0.05/len(snp_cols)), line_dash="dash", 
+                                      annotation_text="Bonferroni threshold")
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        sig = df_res[df_res['P_value'] < 0.05]
+                        if not sig.empty:
+                            st.subheader("SNPs suggestifs (p < 0.05)")
+                            st.dataframe(sig.sort_values('P_value'), use_container_width=True, hide_index=True)
+                        else:
+                            st.info("Aucun SNP significatif au seuil de 0.05.")
+            except Exception as e:
+                st.error(f"Erreur lors de l'analyse : {e}")
 
 def page_composition():
     st.title("🥩 Composition Corporelle Estimée")

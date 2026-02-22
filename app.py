@@ -981,8 +981,14 @@ def page_gestion_elevage():
                     
                     submitted = st.form_submit_button("Ajouter")
                     if submitted:
+                        # Vérifier si la colonne poids_vif existe, sinon l'ajouter
+                        cursor = db.conn.execute("PRAGMA table_info(brebis)")
+                        columns = [col[1] for col in cursor.fetchall()]
+                        if 'poids_vif' not in columns:
+                            db.execute("ALTER TABLE brebis ADD COLUMN poids_vif REAL")
+                            st.info("Colonne poids_vif ajoutée automatiquement.")
+                        
                         elevage_id = elevages_dict[elevage_choice]
-                        # Sauvegarder les photos
                         profil_filename = save_uploaded_photo(photo_profil)
                         mamelle_filename = save_uploaded_photo(photo_mamelle)
                         

@@ -880,6 +880,7 @@ def page_gestion_elevage():
     
     tab1, tab2, tab3 = st.tabs(["👨‍🌾 Éleveurs", "🏡 Élevages", "🐑 Brebis"])
     
+    # --- Onglet Éleveurs ---
     with tab1:
         st.subheader("Liste des éleveurs")
         
@@ -889,7 +890,8 @@ def page_gestion_elevage():
                 region = st.text_input("Région")
                 telephone = st.text_input("Téléphone")
                 email = st.text_input("Email")
-                if st.form_submit_button("Ajouter"):
+                submitted = st.form_submit_button("Ajouter")
+                if submitted:
                     db.execute(
                         "INSERT INTO eleveurs (user_id, nom, region, telephone, email) VALUES (?, ?, ?, ?, ?)",
                         (st.session_state.user_id, nom, region, telephone, email)
@@ -906,8 +908,8 @@ def page_gestion_elevage():
             st.dataframe(df, use_container_width=True, hide_index=True)
             
             with st.expander("🗑️ Supprimer un éleveur"):
-                del_id = st.selectbox("Choisir l'éleveur", [f"{e[0]} - {e[1]}" for e in eleveurs])
-                if st.button("Supprimer"):
+                del_id = st.selectbox("Choisir l'éleveur", [f"{e[0]} - {e[1]}" for e in eleveurs], key="del_eleveur_select")
+                if st.button("Supprimer", key="del_eleveur_btn"):
                     eid = int(del_id.split(" - ")[0])
                     count = db.fetchone("SELECT COUNT(*) FROM elevages WHERE eleveur_id=?", (eid,))[0]
                     if count > 0:
@@ -919,6 +921,7 @@ def page_gestion_elevage():
         else:
             st.info("Aucun éleveur enregistré.")
     
+    # --- Onglet Élevages ---
     with tab2:
         st.subheader("Liste des élevages")
         
@@ -936,7 +939,8 @@ def page_gestion_elevage():
                     nom_elevage = st.text_input("Nom de l'élevage")
                     localisation = st.text_input("Localisation")
                     superficie = st.number_input("Superficie (ha)", min_value=0.0, step=0.1)
-                    if st.form_submit_button("Ajouter"):
+                    submitted = st.form_submit_button("Ajouter")
+                    if submitted:
                         eleveur_id = eleveurs_dict[eleveur_choice]
                         db.execute(
                             "INSERT INTO elevages (eleveur_id, nom, localisation, superficie) VALUES (?, ?, ?, ?)",
@@ -956,8 +960,8 @@ def page_gestion_elevage():
                 st.dataframe(df, use_container_width=True, hide_index=True)
                 
                 with st.expander("🗑️ Supprimer un élevage"):
-                    del_id = st.selectbox("Choisir l'élevage", [f"{e[0]} - {e[1]}" for e in elevages])
-                    if st.button("Supprimer"):
+                    del_id = st.selectbox("Choisir l'élevage", [f"{e[0]} - {e[1]}" for e in elevages], key="del_elevage_select")
+                    if st.button("Supprimer", key="del_elevage_btn"):
                         eid = int(del_id.split(" - ")[0])
                         count = db.fetchone("SELECT COUNT(*) FROM brebis WHERE elevage_id=?", (eid,))[0]
                         if count > 0:
@@ -969,6 +973,7 @@ def page_gestion_elevage():
             else:
                 st.info("Aucun élevage enregistré.")
     
+    # --- Onglet Brebis ---
     with tab3:
         st.subheader("Liste des brebis")
         
@@ -1000,7 +1005,8 @@ def page_gestion_elevage():
                             return base64.b64encode(img_file.read()).decode()
                         return ""
                     
-                    if st.form_submit_button("Ajouter"):
+                    submitted = st.form_submit_button("Ajouter")
+                    if submitted:
                         elevage_id = elevages_dict[elevage_choice]
                         db.execute("""
                             INSERT INTO brebis 
@@ -1026,17 +1032,17 @@ def page_gestion_elevage():
                 st.dataframe(df, use_container_width=True, hide_index=True)
                 
                 with st.expander("🔧 Modifier / Supprimer une brebis"):
-                    choix = st.selectbox("Choisir une brebis", [f"{b[0]} - {b[1]} {b[2]}" for b in brebis])
+                    choix = st.selectbox("Choisir une brebis", [f"{b[0]} - {b[1]} {b[2]}" for b in brebis], key="brebis_select")
                     bid = int(choix.split(" - ")[0])
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        if st.button("Supprimer cette brebis"):
+                        if st.button("Supprimer cette brebis", key="del_brebis_btn"):
                             db.execute("DELETE FROM brebis WHERE id=?", (bid,))
                             st.success("Brebis supprimée")
                             st.rerun()
                     with col2:
-                        if st.button("Voir détails"):
+                        if st.button("Voir détails", key="details_brebis_btn"):
                             b = db.fetchone("SELECT * FROM brebis WHERE id=?", (bid,))
                             st.json(dict(zip([col[0] for col in db.conn.execute("PRAGMA table_info(brebis)").fetchall()], b)))
             else:

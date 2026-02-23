@@ -35,9 +35,9 @@ try:
     from ydata_profiling import ProfileReport
     from streamlit_pandas_profiling import st_profile_report
     profiling_available = True
-except ImportError as e:
+except ImportError:
     profiling_available = False
-    st.warning(f"Module ydata-profiling non disponible : {e}. L'analyse exploratoire ne sera pas active.")
+    st.warning("Module ydata-profiling non disponible. L'analyse exploratoire avancée ne sera pas active, mais des statistiques descriptives sont disponibles.")
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION

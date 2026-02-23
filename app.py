@@ -328,7 +328,7 @@ def save_uploaded_photo(uploaded_file):
     return None
 
 # -----------------------------------------------------------------------------
-# FONCTION UTILITAIRE POUR FILTRER PAR ÉLEVEUR
+# FONCTION DE FILTRAGE PAR ÉLEVEUR
 # -----------------------------------------------------------------------------
 def filtrer_par_eleveur(query_base: str, params: list, join_eleveur: bool = True) -> tuple:
     """Ajoute une condition sur l'éleveur actif à la requête et retourne (query, params)."""
@@ -765,7 +765,7 @@ def page_composition():
     st.title("🥩 Composition Corporelle Estimée")
     st.markdown("Estimation détaillée de la répartition viande/graisse/os basée sur les équations zootechniques")
 
-    # Récupération des brebis de l'utilisateur avec filtre éleveur
+    # Récupération des brebis selon l'éleveur actif
     params = [st.session_state.user_id]
     query_brebis = """
         SELECT b.id, b.numero_id, b.nom, b.race, e.nom
@@ -786,7 +786,6 @@ def page_composition():
         selected = st.selectbox("Choisir une brebis", list(brebis_options.keys()))
         brebis_id = brebis_options[selected]
         if brebis_id is not None:
-            # Récupérer les infos de la brebis
             info = db.fetchone("SELECT poids_vif, race, etat_physio FROM brebis WHERE id=?", (brebis_id,))
             if info:
                 poids_def = info[0] if info[0] is not None else 45.0
@@ -806,7 +805,6 @@ def page_composition():
         race_def = "Autre"
         etat_def = "Tarie"
 
-    # Formulaire de saisie des paramètres
     col1, col2, col3 = st.columns(3)
     with col1:
         poids_vif = st.number_input("Poids vif (kg)", min_value=10.0, max_value=150.0, value=poids_def, step=0.5)
@@ -825,7 +823,6 @@ def page_composition():
 
         st.subheader("📊 Résultats")
 
-        # Affichage des métriques principales
         cols = st.columns(4)
         metrics = [
             ("🥩 Viande", comp['viande']['kg'], comp['viande']['pct'], Config.VERT),
@@ -844,7 +841,6 @@ def page_composition():
                 </div>
                 """, unsafe_allow_html=True)
 
-        # Graphique camembert
         fig = go.Figure(data=[go.Pie(
             labels=['Viande', 'Graisse', 'Os'],
             values=[comp['viande']['kg'], comp['graisse']['kg'], comp['os']['kg']],
@@ -854,7 +850,6 @@ def page_composition():
         fig.update_layout(title="Composition de la carcasse (kg)")
         st.plotly_chart(fig, use_container_width=True)
 
-        # Détails découpes
         with st.expander("🔪 Détails des découpes"):
             decoupes_data = {
                 "Découpe": ["Gigot", "Épaule", "Côtelettes", "Poitrine"],
@@ -865,10 +860,8 @@ def page_composition():
             df_decoupes = pd.DataFrame(decoupes_data)
             st.dataframe(df_decoupes, hide_index=True, use_container_width=True)
 
-        # Sauvegarde dans la base si une brebis est sélectionnée
         if brebis_id is not None:
             if st.button("💾 Enregistrer cette composition dans la base"):
-                # Insérer dans la table composition_corporelle
                 db.execute("""
                     INSERT INTO composition_corporelle 
                     (brebis_id, date_estimation, poids_vif, poids_carcasse, rendement_carcasse,
@@ -885,23 +878,19 @@ def page_composition():
                 ))
                 st.success("Composition enregistrée pour cette brebis !")
 
-    # Section de comparaison entre plusieurs brebis
+    # Section de comparaison
     st.divider()
     st.subheader("🔍 Comparer plusieurs brebis")
 
     if len(brebis_list) >= 2:
-        # Sélection multiple de brebis
         selected_ids = st.multiselect(
             "Choisir les brebis à comparer",
             options=list(brebis_options.keys()),
             default=list(brebis_options.keys())[:min(2, len(brebis_options))]
         )
-        # Filtrer pour ne garder que les IDs réels (exclure l'option manuelle)
         selected_ids = [brebis_options[id_str] for id_str in selected_ids if brebis_options[id_str] is not None]
 
         if len(selected_ids) >= 2:
-            # Récupérer les compositions enregistrées pour ces brebis
-            # On prend la plus récente pour chaque
             comp_data = []
             for bid in selected_ids:
                 row = db.fetchone("""
@@ -913,7 +902,6 @@ def page_composition():
                     LIMIT 1
                 """, (bid,))
                 if row:
-                    # Récupérer le nom de la brebis
                     name = db.fetchone("SELECT numero_id, nom FROM brebis WHERE id=?", (bid,))
                     label = f"{name[0]} {name[1]}" if name else f"Brebis {bid}"
                     comp_data.append({
@@ -929,7 +917,6 @@ def page_composition():
                     })
             if comp_data:
                 df_comp = pd.DataFrame(comp_data)
-                # Graphique comparatif
                 fig_comp = go.Figure()
                 for animal in comp_data:
                     fig_comp.add_trace(go.Bar(
@@ -946,7 +933,6 @@ def page_composition():
                 )
                 st.plotly_chart(fig_comp, use_container_width=True)
 
-                # Tableau comparatif
                 st.dataframe(df_comp[['nom', 'poids_vif', 'poids_carcasse', 'rendement', 'viande', 'graisse', 'os']].round(2),
                            use_container_width=True, hide_index=True)
             else:
@@ -993,7 +979,7 @@ def page_gestion_elevage():
     
     tab1, tab2, tab3 = st.tabs(["👨‍🌾 Éleveurs", "🏡 Élevages", "🐑 Brebis"])
     
-    # --- Onglet Éleveurs (inchangé) ---
+    # --- Onglet Éleveurs ---
     with tab1:
         st.subheader("Liste des éleveurs")
         
@@ -1034,67 +1020,44 @@ def page_gestion_elevage():
         else:
             st.info("Aucun éleveur enregistré.")
     
-    # --- Onglet Élevages (filtré) ---
+    # --- Onglet Élevages ---
     with tab2:
         st.subheader("Liste des élevages")
         
-        eleveurs_list = db.fetchall(
-            "SELECT id, nom FROM eleveurs WHERE user_id=?", (st.session_state.user_id,)
-        )
-        eleveurs_dict = {f"{e[0]} - {e[1]}": e[0] for e in eleveurs_list}
+        # Récupérer les élevages de l'éleveur sélectionné
+        params = [st.session_state.user_id]
+        query = """
+            SELECT e.id, e.nom, e.localisation, e.superficie, el.nom
+            FROM elevages e
+            JOIN eleveurs el ON e.eleveur_id = el.id
+            WHERE el.user_id=?
+        """
+        query, params = filtrer_par_eleveur(query, params, join_eleveur=True)
+        elevages = db.fetchall(query, params)
         
-        if not eleveurs_dict:
-            st.warning("Vous devez d'abord ajouter un éleveur.")
+        if not elevages:
+            st.info("Aucun élevage pour cet éleveur.")
         else:
-            with st.expander("➕ Ajouter un élevage"):
-                with st.form("form_elevage"):
-                    eleveur_choice = st.selectbox("Éleveur", list(eleveurs_dict.keys()))
-                    nom_elevage = st.text_input("Nom de l'élevage")
-                    localisation = st.text_input("Localisation")
-                    superficie = st.number_input("Superficie (ha)", min_value=0.0, step=0.1)
-                    submitted = st.form_submit_button("Ajouter")
-                    if submitted:
-                        eleveur_id = eleveurs_dict[eleveur_choice]
-                        db.execute(
-                            "INSERT INTO elevages (eleveur_id, nom, localisation, superficie) VALUES (?, ?, ?, ?)",
-                            (eleveur_id, nom_elevage, localisation, superficie)
-                        )
-                        st.success("Élevage ajouté")
-                        st.rerun()
+            df = pd.DataFrame(elevages, columns=["ID", "Nom", "Localisation", "Superficie", "Éleveur"])
+            st.dataframe(df, use_container_width=True, hide_index=True)
             
-            # Récupérer les élevages avec filtre sur l'éleveur actif
-            params = [st.session_state.user_id]
-            query_elev = """
-                SELECT e.id, e.nom, e.localisation, e.superficie, el.nom
-                FROM elevages e
-                JOIN eleveurs el ON e.eleveur_id = el.id
-                WHERE el.user_id=?
-            """
-            query_elev, params = filtrer_par_eleveur(query_elev, params, join_eleveur=True)
-            elevages = db.fetchall(query_elev, params)
-            if elevages:
-                df = pd.DataFrame(elevages, columns=["ID", "Nom", "Localisation", "Superficie", "Éleveur"])
-                st.dataframe(df, use_container_width=True, hide_index=True)
-                
-                with st.expander("🗑️ Supprimer un élevage"):
-                    del_id = st.selectbox("Choisir l'élevage", [f"{e[0]} - {e[1]}" for e in elevages], key="del_elevage_select")
-                    if st.button("Supprimer", key="del_elevage_btn"):
-                        eid = int(del_id.split(" - ")[0])
-                        count = db.fetchone("SELECT COUNT(*) FROM brebis WHERE elevage_id=?", (eid,))[0]
-                        if count > 0:
-                            st.error("Cet élevage contient encore des brebis. Supprimez d'abord les brebis.")
-                        else:
-                            db.execute("DELETE FROM elevages WHERE id=?", (eid,))
-                            st.success("Élevage supprimé")
-                            st.rerun()
-            else:
-                st.info("Aucun élevage enregistré.")
+            with st.expander("🗑️ Supprimer un élevage"):
+                del_id = st.selectbox("Choisir l'élevage", [f"{e[0]} - {e[1]}" for e in elevages], key="del_elevage_select")
+                if st.button("Supprimer", key="del_elevage_btn"):
+                    eid = int(del_id.split(" - ")[0])
+                    count = db.fetchone("SELECT COUNT(*) FROM brebis WHERE elevage_id=?", (eid,))[0]
+                    if count > 0:
+                        st.error("Cet élevage contient encore des brebis. Supprimez d'abord les brebis.")
+                    else:
+                        db.execute("DELETE FROM elevages WHERE id=?", (eid,))
+                        st.success("Élevage supprimé")
+                        st.rerun()
     
-    # --- Onglet Brebis (filtré) ---
+    # --- Onglet Brebis ---
     with tab3:
         st.subheader("Liste des brebis")
         
-        # Récupérer les élevages de l'éleveur sélectionné pour le formulaire d'ajout
+        # Récupérer les élevages de l'éleveur sélectionné (pour formulaire d'ajout)
         params_elev = [st.session_state.user_id]
         query_elev = """
             SELECT e.id, e.nom, el.nom
@@ -1107,7 +1070,7 @@ def page_gestion_elevage():
         elevages_dict = {f"{e[0]} - {e[1]} ({e[2]})": e[0] for e in elevages_list}
         
         if not elevages_dict:
-            st.warning("Aucun élevage trouvé pour l'éleveur sélectionné.")
+            st.warning("Aucun élevage pour cet éleveur. Veuillez d'abord ajouter un élevage.")
         else:
             with st.expander("➕ Ajouter une brebis"):
                 with st.form("form_brebis"):
@@ -1123,7 +1086,7 @@ def page_gestion_elevage():
                     
                     submitted = st.form_submit_button("Ajouter")
                     if submitted:
-                        # Vérifier si la colonne poids_vif existe, sinon l'ajouter
+                        # Vérifier si la colonne poids_vif existe
                         cursor = db.conn.execute("PRAGMA table_info(brebis)")
                         columns = [col[1] for col in cursor.fetchall()]
                         if 'poids_vif' not in columns:
@@ -1146,7 +1109,7 @@ def page_gestion_elevage():
                         st.success("Brebis ajoutée")
                         st.rerun()
             
-            # Récupérer les brebis avec filtre sur l'éleveur actif
+            # Récupérer les brebis de l'éleveur sélectionné
             params_brebis = [st.session_state.user_id]
             query_brebis = """
                 SELECT b.id, b.numero_id, b.nom, b.race, b.date_naissance, b.etat_physio, e.nom, b.poids_vif
@@ -1157,10 +1120,9 @@ def page_gestion_elevage():
             """
             query_brebis, params_brebis = filtrer_par_eleveur(query_brebis, params_brebis, join_eleveur=True)
             brebis = db.fetchall(query_brebis, params_brebis)
-
+            
             if brebis:
-                col_names = ["ID", "Numéro", "Nom", "Race", "Naissance", "État", "Élevage", "Poids vif (kg)"]
-                df = pd.DataFrame(brebis, columns=col_names)
+                df = pd.DataFrame(brebis, columns=["ID", "Numéro", "Nom", "Race", "Naissance", "État", "Élevage", "Poids vif (kg)"])
                 st.dataframe(df, use_container_width=True, hide_index=True)
                 
                 with st.expander("🔧 Modifier / Supprimer une brebis"):
@@ -1170,7 +1132,6 @@ def page_gestion_elevage():
                     col1, col2 = st.columns(2)
                     with col1:
                         if st.button("Supprimer cette brebis", key="del_brebis_btn"):
-                            # Supprimer aussi les photos associées
                             photos = db.fetchone("SELECT photo_profil, photo_mamelle FROM brebis WHERE id=?", (bid,))
                             if photos:
                                 for p in photos:
@@ -1185,10 +1146,8 @@ def page_gestion_elevage():
                     with col2:
                         if st.button("Voir détails", key="details_brebis_btn"):
                             b = db.fetchone("SELECT * FROM brebis WHERE id=?", (bid,))
-                            # Obtenir les noms de colonnes
                             cols = [col[0] for col in db.conn.execute("PRAGMA table_info(brebis)").fetchall()]
                             data = dict(zip(cols, b))
-                            # Remplacer les noms de fichiers par un indicateur
                             if data.get('photo_profil'):
                                 data['photo_profil'] = f"Fichier: {data['photo_profil']}"
                             if data.get('photo_mamelle'):
@@ -1198,14 +1157,13 @@ def page_gestion_elevage():
                 st.info("Aucune brebis enregistrée.")
 
 # -----------------------------------------------------------------------------
-# PAGE PRODUCTION LAITIÈRE (filtrée)
+# PAGE PRODUCTION LAITIÈRE
 # -----------------------------------------------------------------------------
 def page_production():
     st.title("🥛 Production laitière et analyses biochimiques")
     
     tab1, tab2 = st.tabs(["📈 Suivi production", "🧪 Analyses biochimiques"])
     
-    # Récupérer les brebis selon l'éleveur actif
     params = [st.session_state.user_id]
     query_brebis = """
         SELECT b.id, b.numero_id, b.nom, e.nom
@@ -1219,7 +1177,7 @@ def page_production():
     brebis_dict = {f"{b[0]} - {b[1]} {b[2]} ({b[3]})": b[0] for b in brebis_list}
     
     if not brebis_dict:
-        st.warning("Aucune brebis disponible. Veuillez d'abord ajouter des brebis.")
+        st.warning("Aucune brebis disponible pour cet éleveur.")
         return
     
     with tab1:
@@ -1256,19 +1214,17 @@ def page_production():
         else:
             st.info("Aucune donnée pour cette brebis.")
         
-        # Production par éleveur (toutes les brebis de l'utilisateur, mais limité à l'éleveur sélectionné si applicable)
         st.subheader("Production par éleveur")
-        params_all = [st.session_state.user_id]
-        query_all = """
+        # Ici on veut la production de tous les éleveurs de l'utilisateur (pas filtré par éleveur actif)
+        data_all = db.fetchall("""
             SELECT el.nom AS eleveur, b.numero_id, p.date, p.quantite
             FROM productions p
             JOIN brebis b ON p.brebis_id = b.id
             JOIN elevages e ON b.elevage_id = e.id
             JOIN eleveurs el ON e.eleveur_id = el.id
             WHERE el.user_id=?
-        """
-        query_all, params_all = filtrer_par_eleveur(query_all, params_all, join_eleveur=True)
-        data_all = db.fetchall(query_all, params_all)
+            ORDER BY p.date
+        """, (st.session_state.user_id,))
         if data_all:
             df_all = pd.DataFrame(data_all, columns=["Éleveur", "Brebis", "Date", "Quantité"])
             df_all["Date"] = pd.to_datetime(df_all["Date"])
@@ -1316,8 +1272,7 @@ def page_production():
                 st.rerun()
         
         st.subheader("Dernières analyses enregistrées")
-        params_bio = [st.session_state.user_id]
-        query_bio = """
+        data_bio = db.fetchall("""
             SELECT b.numero_id, b.nom, p.date, p.ph, p.mg, p.proteine, p.ag_satures, p.densite, p.extrait_sec
             FROM productions p
             JOIN brebis b ON p.brebis_id = b.id
@@ -1325,9 +1280,7 @@ def page_production():
             JOIN eleveurs el ON e.eleveur_id = el.id
             WHERE el.user_id=? AND (p.ph IS NOT NULL OR p.mg IS NOT NULL)
             ORDER BY p.date DESC LIMIT 20
-        """
-        query_bio, params_bio = filtrer_par_eleveur(query_bio, params_bio, join_eleveur=True)
-        data_bio = db.fetchall(query_bio, params_bio)
+        """, (st.session_state.user_id,))
         if data_bio:
             df_bio = pd.DataFrame(data_bio, columns=["Numéro", "Nom", "Date", "pH", "MG", "Protéines", "AGS", "Densité", "Extrait sec"])
             st.dataframe(df_bio, use_container_width=True, hide_index=True)
@@ -1335,22 +1288,14 @@ def page_production():
             st.info("Aucune analyse biochimique.")
 
 # -----------------------------------------------------------------------------
-# PAGE GÉNOMIQUE AVANCÉE (inchangée)
+# PAGE GÉNOMIQUE AVANCÉE (corrigée)
 # -----------------------------------------------------------------------------
 def page_genomique_avancee():
     st.title("🧬 Génomique avancée")
     
     tab1, tab2, tab3 = st.tabs(["🔍 BLAST", "🧬 SNPs d'intérêt", "📊 GWAS"])
     
-    brebis_list = db.fetchall("""
-        SELECT b.id, b.numero_id, b.nom
-        FROM brebis b
-        JOIN elevages e ON b.elevage_id = e.id
-        JOIN eleveurs el ON e.eleveur_id = el.id
-        WHERE el.user_id=?
-    """, (st.session_state.user_id,))
-    # Pas de filtre par éleveur ici car c'est une page spécifique (on peut laisser tous)
-    # Mais on peut appliquer le filtre si on veut limiter aux brebis de l'éleveur sélectionné
+    # Récupérer les brebis de l'éleveur sélectionné (pour la sélection)
     params = [st.session_state.user_id]
     query_brebis = """
         SELECT b.id, b.numero_id, b.nom
@@ -1508,12 +1453,11 @@ def page_genomique_avancee():
                 st.error(f"Erreur lors de l'analyse : {e}")
 
 # -----------------------------------------------------------------------------
-# PAGE PHOTOGRAMMÉTRIE AMÉLIORÉE (filtrée)
+# PAGE PHOTOGRAMMÉTRIE AMÉLIORÉE (avec affichage des photos depuis fichiers)
 # -----------------------------------------------------------------------------
 def page_analyse():
     st.title("📸 Analyse Photogrammétrique")
     
-    # Récupérer les brebis avec filtre
     params = [st.session_state.user_id]
     query_brebis = """
         SELECT b.id, b.numero_id, b.nom, e.nom, b.photo_profil, b.photo_mamelle
@@ -1527,13 +1471,12 @@ def page_analyse():
     brebis_dict = {f"{b[0]} - {b[1]} {b[2]} ({b[3]})": b[0] for b in brebis_list}
     
     if not brebis_dict:
-        st.warning("Aucune brebis disponible. Veuillez d'abord ajouter des brebis.")
+        st.warning("Aucune brebis disponible pour cet éleveur.")
         return
     
     selected_brebis = st.selectbox("Sélectionner la brebis", list(brebis_dict.keys()))
     brebis_id = brebis_dict[selected_brebis]
     
-    # Récupérer les infos de la brebis
     brebis_info = db.fetchone("SELECT date_naissance, race, photo_profil, photo_mamelle FROM brebis WHERE id=?", (brebis_id,))
     if brebis_info:
         date_naiss = datetime.strptime(brebis_info[0], "%Y-%m-%d").date()
@@ -1558,7 +1501,6 @@ def page_analyse():
     
     st.info(f"Âge estimé : {age_mois} mois ({age_dents})")
     
-    # Afficher la photo de profil si disponible
     if profil_file and os.path.exists(os.path.join(PHOTO_DIR, profil_file)):
         st.image(os.path.join(PHOTO_DIR, profil_file), caption="Photo de profil", width=300)
     
@@ -1617,7 +1559,6 @@ def page_analyse():
     with tab2:
         st.subheader("Scoring mamelles")
         
-        # Afficher la photo mamelle si disponible
         if mamelle_file and os.path.exists(os.path.join(PHOTO_DIR, mamelle_file)):
             st.image(os.path.join(PHOTO_DIR, mamelle_file), caption="Mamelle", width=300)
         
@@ -1654,7 +1595,7 @@ def page_analyse():
                     st.success("Aspect sain (simulation).")
 
 # -----------------------------------------------------------------------------
-# PAGE SANTÉ (filtrée)
+# PAGE SANTÉ
 # -----------------------------------------------------------------------------
 def page_sante():
     st.title("🏥 Suivi sanitaire et vaccinal")
@@ -1732,7 +1673,7 @@ def page_sante():
             st.info("Aucun soin enregistré.")
 
 # -----------------------------------------------------------------------------
-# PAGE REPRODUCTION (filtrée)
+# PAGE REPRODUCTION
 # -----------------------------------------------------------------------------
 def page_reproduction():
     st.title("🤰 Gestion de la reproduction")
@@ -1967,7 +1908,6 @@ def page_nutrition_avancee():
     with tab3:
         st.subheader("Calcul de ration personnalisée")
         
-        # Récupérer les brebis avec filtre éleveur
         params = [st.session_state.user_id]
         query_brebis = """
             SELECT b.id, b.numero_id, b.nom, b.etat_physio, b.poids_vif
@@ -2056,7 +1996,7 @@ def page_nutrition_avancee():
             st.info("Aucune brebis disponible. Vous pouvez utiliser 'Personnalisé'.")
 
 # -----------------------------------------------------------------------------
-# PAGE EXPORT (inchangée)
+# PAGE EXPORT (avec inclusion des photos)
 # -----------------------------------------------------------------------------
 def page_export():
     st.title("📤 Export des données")
@@ -2182,7 +2122,7 @@ def page_export():
             )
 
 # -----------------------------------------------------------------------------
-# PAGE ÉLITE ET COMPARAISON (nouvelle)
+# PAGE ÉLITE ET COMPARAISON
 # -----------------------------------------------------------------------------
 def page_elite():
     st.title("🏆 Élite et comparaison")
@@ -2206,8 +2146,6 @@ def page_elite():
     
     df = pd.DataFrame(brebis, columns=["id", "numero", "nom", "race", "naissance", "poids", "elevage", "eleveur"])
     
-    # Ajouter des colonnes calculées
-    
     # Production laitière moyenne des 30 derniers jours
     prod_moy = []
     for bid in df["id"]:
@@ -2228,7 +2166,7 @@ def page_elite():
         score_morpho.append(score[0] if score else 0)
     df["score_morpho"] = score_morpho
     
-    # Estimation simple de la viande (à affiner)
+    # Estimation simple de la viande
     df["viande_estimee (kg)"] = df["poids"] * 0.45
     
     # Dernière composition enregistrée (rendement)
@@ -2262,14 +2200,17 @@ def page_elite():
     
     st.dataframe(top[["numero", "nom", "eleveur", "elevage", critere]].round(2))
     
-    # Graphique
     fig = px.bar(top, x="nom", y=critere, color="eleveur", title=f"Top {top_n} - {critere}")
     st.plotly_chart(fig, use_container_width=True)
     
     # Comparaison entre éleveurs (si tous sélectionnés)
     if st.session_state.eleveur_id is None and len(df["eleveur"].unique()) > 1:
         st.subheader("📈 Comparaison par éleveur")
-        df_eleveur = df.groupby("eleveur")[["prod_moy (L/j)", "score_morpho", "poids", "viande_estimee (kg)", "rendement (%)"]].mean().reset_index()
+        numeric_cols = ["prod_moy (L/j)", "score_morpho", "poids", "viande_estimee (kg)", "rendement (%)"]
+        df_eleveur = df.groupby("eleveur")[numeric_cols].mean().reset_index()
+        # Convertir en float et remplacer NaN par 0
+        for col in numeric_cols:
+            df_eleveur[col] = pd.to_numeric(df_eleveur[col], errors='coerce').fillna(0)
         st.dataframe(df_eleveur.round(2))
         
         fig2 = px.bar(df_eleveur, x="eleveur", y=["prod_moy (L/j)", "score_morpho", "rendement (%)"], 
@@ -2295,7 +2236,6 @@ def sidebar():
             eleveurs_options = {"Tous les éleveurs": None}
             eleveurs_options.update({f"{e[1]} (ID {e[0]})": e[0] for e in eleveurs})
             
-            # Trouver l'index par défaut pour conserver la sélection
             current = st.session_state.get("eleveur_id", None)
             default_index = 0
             for i, (label, eid) in enumerate(eleveurs_options.items()):

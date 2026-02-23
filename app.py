@@ -2191,24 +2191,26 @@ def page_elite():
     top_n = st.slider("Nombre de brebis à afficher", 5, 50, 10)
     ascending = st.checkbox("Ordre croissant", False)
     
-    # Filtrer les lignes où le critère n'est pas nul
+    # Conversion explicite en numérique et suppression des lignes sans valeur
+    df[critere] = pd.to_numeric(df[critere], errors='coerce')
     df_class = df[df[critere].notna()].copy()
-    if ascending:
-        top = df_class.nsmallest(top_n, critere)
+    if df_class.empty:
+        st.warning(f"Aucune valeur numérique valide pour le critère {critere}.")
     else:
-        top = df_class.nlargest(top_n, critere)
-    
-    st.dataframe(top[["numero", "nom", "eleveur", "elevage", critere]].round(2))
-    
-    fig = px.bar(top, x="nom", y=critere, color="eleveur", title=f"Top {top_n} - {critere}")
-    st.plotly_chart(fig, use_container_width=True)
+        if ascending:
+            top = df_class.nsmallest(top_n, critere)
+        else:
+            top = df_class.nlargest(top_n, critere)
+        st.dataframe(top[["numero", "nom", "eleveur", "elevage", critere]].round(2))
+        
+        fig = px.bar(top, x="nom", y=critere, color="eleveur", title=f"Top {top_n} - {critere}")
+        st.plotly_chart(fig, use_container_width=True)
     
     # Comparaison entre éleveurs (si tous sélectionnés)
     if st.session_state.eleveur_id is None and len(df["eleveur"].unique()) > 1:
         st.subheader("📈 Comparaison par éleveur")
         numeric_cols = ["prod_moy (L/j)", "score_morpho", "poids", "viande_estimee (kg)", "rendement (%)"]
         df_eleveur = df.groupby("eleveur")[numeric_cols].mean().reset_index()
-        # Convertir en float et remplacer NaN par 0
         for col in numeric_cols:
             df_eleveur[col] = pd.to_numeric(df_eleveur[col], errors='coerce').fillna(0)
         st.dataframe(df_eleveur.round(2))
@@ -2216,7 +2218,6 @@ def page_elite():
         fig2 = px.bar(df_eleveur, x="eleveur", y=["prod_moy (L/j)", "score_morpho", "rendement (%)"], 
                      barmode="group", title="Performances moyennes par éleveur")
         st.plotly_chart(fig2, use_container_width=True)
-
 # -----------------------------------------------------------------------------
 # SIDEBAR ET MAIN
 # -----------------------------------------------------------------------------

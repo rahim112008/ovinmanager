@@ -1374,7 +1374,7 @@ def page_gestion_elevage():
     with tab1:
         st.subheader("Liste des éleveurs")
         
-        with st.expander("➕ Ajouter un éleveur"):
+        with st.expander("➕ Ajouter un élevage", expanded=True):
             with st.form("form_eleveur"):
                 nom = st.text_input("Nom")
                 region = st.text_input("Région")

@@ -10,3 +10,8 @@ statsmodels
 openpyxl
 xlsxwriter
 tensorflow
+
+
+pandas-profiling
+streamlit-pandas-profiling
+ydata-profiling

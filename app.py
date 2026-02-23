@@ -1901,7 +1901,7 @@ def page_export():
     inclure_photos = st.checkbox("Inclure les photos dans l'archive (pour CSV uniquement)", value=True)
     
     if st.button("Générer l'export"):
-        # Liste des tables à exporter
+        # Liste des tables à exporter (dans l'ordre)
         all_tables = [
             "eleveurs", "elevages", "brebis", 
             "productions", "mesures_morpho", "mesures_mamelles", "composition_corporelle",
@@ -1914,67 +1914,76 @@ def page_export():
         existing_tables = [row[0] for row in cursor.fetchall()]
         
         data_frames = {}
+        
         for table in all_tables:
-            if table not in existing_tables:
-                st.warning(f"La table {table} n'existe pas encore dans la base. Elle sera ignorée.")
+            # Déterminer les colonnes de la table (si elle existe)
+            if table in existing_tables:
+                cursor = db.conn.execute(f"PRAGMA table_info({table})")
+                columns_info = cursor.fetchall()
+                columns = [col[1] for col in columns_info]
+            else:
+                # Si la table n'existe pas, on définit des colonnes par défaut (on peut laisser vide)
+                # Pour éviter l'erreur, on passe
+                st.warning(f"La table {table} n'existe pas. Elle sera ignorée.")
                 data_frames[table] = pd.DataFrame()
                 continue
             
+            # Créer un dataframe vide avec ces colonnes
+            df_empty = pd.DataFrame(columns=columns)
+            
             try:
+                # Remplir avec les données de l'utilisateur selon le type de table
                 if table == "eleveurs":
-                    df = pd.read_sql_query(f"SELECT * FROM {table} WHERE user_id=?", db.conn, params=(st.session_state.user_id,))
-                
+                    df_data = pd.read_sql_query(f"SELECT * FROM {table} WHERE user_id=?", db.conn, params=(st.session_state.user_id,))
                 elif table == "elevages":
-                    df = pd.read_sql_query("""
+                    df_data = pd.read_sql_query("""
                         SELECT e.* FROM elevages e
                         JOIN eleveurs el ON e.eleveur_id = el.id
                         WHERE el.user_id=?
                     """, db.conn, params=(st.session_state.user_id,))
-                
                 elif table == "brebis":
-                    df = pd.read_sql_query("""
+                    df_data = pd.read_sql_query("""
                         SELECT b.* FROM brebis b
                         JOIN elevages e ON b.elevage_id = e.id
                         JOIN eleveurs el ON e.eleveur_id = el.id
                         WHERE el.user_id=?
                     """, db.conn, params=(st.session_state.user_id,))
-                
                 elif table in ["productions", "vaccinations", "soins", "chaleurs", "saillies", "mises_bas"]:
-                    df = pd.read_sql_query(f"""
+                    df_data = pd.read_sql_query(f"""
                         SELECT t.* FROM {table} t
                         JOIN brebis b ON t.brebis_id = b.id
                         JOIN elevages e ON b.elevage_id = e.id
                         JOIN eleveurs el ON e.eleveur_id = el.id
                         WHERE el.user_id=?
                     """, db.conn, params=(st.session_state.user_id,))
-                
                 elif table in ["mesures_morpho", "mesures_mamelles", "composition_corporelle"]:
-                    df = pd.read_sql_query(f"""
+                    df_data = pd.read_sql_query(f"""
                         SELECT t.* FROM {table} t
                         JOIN brebis b ON t.brebis_id = b.id
                         JOIN elevages e ON b.elevage_id = e.id
                         JOIN eleveurs el ON e.eleveur_id = el.id
                         WHERE el.user_id=?
                     """, db.conn, params=(st.session_state.user_id,))
-                
                 else:
-                    # tables globales (aliments, rations, etc.) - pas de filtrage par user
-                    df = pd.read_sql_query(f"SELECT * FROM {table}", db.conn)
+                    # tables globales
+                    df_data = pd.read_sql_query(f"SELECT * FROM {table}", db.conn)
                 
-                data_frames[table] = df
+                # Concaténer le vide avec les données (si les colonnes correspondent)
+                # On utilise concat pour garder l'ordre des colonnes
+                df_combined = pd.concat([df_empty, df_data], ignore_index=True)
+                data_frames[table] = df_combined
             except Exception as e:
                 st.error(f"Erreur lors de l'export de la table {table}: {e}")
-                data_frames[table] = pd.DataFrame()
+                data_frames[table] = df_empty  # au moins les colonnes
         
         # Générer le fichier selon le format
         if format_export.startswith("Excel"):
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 for name, df in data_frames.items():
-                    if not df.empty:
-                        # Limiter le nom de l'onglet à 31 caractères
-                        sheet_name = name[:31]
-                        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    # Limiter le nom de l'onglet à 31 caractères
+                    sheet_name = name[:31]
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
             output.seek(0)
             st.download_button(
                 label="📥 Télécharger Excel",
@@ -1987,6 +1996,10 @@ def page_export():
             with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED) as zip_file:
                 for name, df in data_frames.items():
                     if not df.empty:
+                        csv_data = df.to_csv(index=False).encode('utf-8')
+                        zip_file.writestr(f"{name}.csv", csv_data)
+                    else:
+                        # Même vide, on peut créer un fichier avec juste les en-têtes
                         csv_data = df.to_csv(index=False).encode('utf-8')
                         zip_file.writestr(f"{name}.csv", csv_data)
                 # Ajouter les photos si demandé
@@ -2002,7 +2015,6 @@ def page_export():
                 file_name=f"ovin_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
                 mime="application/zip"
             )
-
 # -----------------------------------------------------------------------------
 # SIDEBAR ET MAIN
 # -----------------------------------------------------------------------------

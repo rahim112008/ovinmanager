@@ -1902,9 +1902,12 @@ def page_export():
     
     if st.button("Générer l'export"):
         # Liste des tables à exporter
-        all_tables = ["eleveurs", "elevages", "brebis", "productions", "mesures_morpho", 
-                      "mesures_mamelles", "composition_corporelle", "vaccinations", "soins", 
-                      "chaleurs", "saillies", "mises_bas", "aliments", "rations", "ration_composition"]
+        all_tables = [
+            "eleveurs", "elevages", "brebis", 
+            "productions", "mesures_morpho", "mesures_mamelles", "composition_corporelle",
+            "vaccinations", "soins", "chaleurs", "saillies", "mises_bas",
+            "aliments", "rations", "ration_composition"
+        ]
         
         # Obtenir la liste des tables réellement présentes dans la base
         cursor = db.conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -1914,19 +1917,29 @@ def page_export():
         for table in all_tables:
             if table not in existing_tables:
                 st.warning(f"La table {table} n'existe pas encore dans la base. Elle sera ignorée.")
-                data_frames[table] = pd.DataFrame()  # vide
+                data_frames[table] = pd.DataFrame()
                 continue
             
             try:
                 if table == "eleveurs":
                     df = pd.read_sql_query(f"SELECT * FROM {table} WHERE user_id=?", db.conn, params=(st.session_state.user_id,))
+                
                 elif table == "elevages":
                     df = pd.read_sql_query("""
                         SELECT e.* FROM elevages e
                         JOIN eleveurs el ON e.eleveur_id = el.id
                         WHERE el.user_id=?
                     """, db.conn, params=(st.session_state.user_id,))
-                elif table in ["brebis", "productions", "vaccinations", "soins", "chaleurs", "saillies", "mises_bas"]:
+                
+                elif table == "brebis":
+                    df = pd.read_sql_query("""
+                        SELECT b.* FROM brebis b
+                        JOIN elevages e ON b.elevage_id = e.id
+                        JOIN eleveurs el ON e.eleveur_id = el.id
+                        WHERE el.user_id=?
+                    """, db.conn, params=(st.session_state.user_id,))
+                
+                elif table in ["productions", "vaccinations", "soins", "chaleurs", "saillies", "mises_bas"]:
                     df = pd.read_sql_query(f"""
                         SELECT t.* FROM {table} t
                         JOIN brebis b ON t.brebis_id = b.id
@@ -1934,6 +1947,7 @@ def page_export():
                         JOIN eleveurs el ON e.eleveur_id = el.id
                         WHERE el.user_id=?
                     """, db.conn, params=(st.session_state.user_id,))
+                
                 elif table in ["mesures_morpho", "mesures_mamelles", "composition_corporelle"]:
                     df = pd.read_sql_query(f"""
                         SELECT t.* FROM {table} t
@@ -1942,8 +1956,9 @@ def page_export():
                         JOIN eleveurs el ON e.eleveur_id = el.id
                         WHERE el.user_id=?
                     """, db.conn, params=(st.session_state.user_id,))
+                
                 else:
-                    # tables globales (aliments, rations, etc.)
+                    # tables globales (aliments, rations, etc.) - pas de filtrage par user
                     df = pd.read_sql_query(f"SELECT * FROM {table}", db.conn)
                 
                 data_frames[table] = df
@@ -1957,7 +1972,9 @@ def page_export():
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 for name, df in data_frames.items():
                     if not df.empty:
-                        df.to_excel(writer, sheet_name=name[:31], index=False)  # max 31 caractères pour les noms d'onglets Excel
+                        # Limiter le nom de l'onglet à 31 caractères
+                        sheet_name = name[:31]
+                        df.to_excel(writer, sheet_name=sheet_name, index=False)
             output.seek(0)
             st.download_button(
                 label="📥 Télécharger Excel",

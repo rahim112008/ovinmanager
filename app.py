@@ -19,17 +19,38 @@ import statsmodels.api as sm
 import zipfile
 import os
 import uuid
+from scipy.optimize import linprog
+import joblib
+import random
+
+# Machine Learning
+from sklearn.ensemble import RandomForestRegressor, IsolationForest
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import ElasticNet
+
+# Pour l'analyse exploratoire (optionnel)
+try:
+    from pandas_profiling import ProfileReport
+    from streamlit_pandas_profiling import st_profile_report
+    profiling_available = True
+except ImportError:
+    profiling_available = False
+    st.warning("pandas-profiling non installé. L'analyse exploratoire automatique ne sera pas disponible.")
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION
 # -----------------------------------------------------------------------------
 PHOTO_DIR = "photos_brebis"
+MODEL_DIR = "models"
 os.makedirs(PHOTO_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 
 class Config:
     APP_NAME = "Ovin Manager Pro"
     LABORATOIRE = "GenApAgiE"
-    VERSION = "4.0"
+    VERSION = "6.0"
     
     VERT = "#2E7D32"
     ORANGE = "#FF6F00"
@@ -213,6 +234,23 @@ class Database:
                 prix_kg REAL
             )
         """)
+        
+        # Remplir la table aliments avec des données de base (marché algérien)
+        aliments_init = [
+            ("Orge", "Concentré", 1.1, 80, 86, 25),
+            ("Maïs", "Concentré", 1.3, 70, 86, 30),
+            ("Son de blé", "Concentré", 0.9, 120, 87, 18),
+            ("Tourteau de soja", "Concentré", 1.2, 400, 88, 45),
+            ("Foin de luzerne", "Fourrage", 0.6, 120, 85, 15),
+            ("Foin d'avoine", "Fourrage", 0.5, 70, 85, 12),
+            ("Paille", "Fourrage", 0.3, 20, 88, 5),
+            ("CMV", "Minéral", 0, 0, 100, 80)
+        ]
+        for alim in aliments_init:
+            try:
+                cursor.execute("INSERT OR IGNORE INTO aliments (nom, type, uem, pdin, ms, prix_kg) VALUES (?, ?, ?, ?, ?, ?)", alim)
+            except:
+                pass
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS rations (
@@ -545,6 +583,111 @@ class GenomicAnalyzer:
         return results
 
 # -----------------------------------------------------------------------------
+# FONCTIONS ML
+# -----------------------------------------------------------------------------
+
+def train_lait_model():
+    """Entraîne un modèle RandomForest pour prédire la production laitière."""
+    query = """
+        SELECT p.quantite, b.race, b.date_naissance, 
+               AVG(m.score_global) as score_morpho,
+               AVG(m2.score_total) as score_mamelle,
+               COUNT(DISTINCT p.id) as nb_mesures
+        FROM productions p
+        JOIN brebis b ON p.brebis_id = b.id
+        LEFT JOIN mesures_morpho m ON b.id = m.brebis_id
+        LEFT JOIN mesures_mamelles m2 ON b.id = m2.brebis_id
+        GROUP BY b.id
+        HAVING nb_mesures > 0
+    """
+    df = pd.read_sql_query(query, db.conn)
+    if len(df) < 20:
+        return None  # Pas assez de données
+    
+    # Features
+    df['age'] = (datetime.now() - pd.to_datetime(df['date_naissance'])).dt.days / 365
+    df = pd.get_dummies(df, columns=['race'], prefix='race')
+    feature_cols = [c for c in df.columns if c not in ['quantite', 'date_naissance', 'nb_mesures']]
+    X = df[feature_cols].fillna(0)
+    y = df['quantite']
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    score = model.score(X_test, y_test)
+    
+    # Sauvegarde
+    joblib.dump(model, os.path.join(MODEL_DIR, 'lait_model.pkl'))
+    joblib.dump(feature_cols, os.path.join(MODEL_DIR, 'lait_features.pkl'))
+    return model, score
+
+def predict_lait_ml(brebis_id):
+    """Prédit la production laitière pour une brebis donnée en utilisant le modèle entraîné."""
+    model_path = os.path.join(MODEL_DIR, 'lait_model.pkl')
+    features_path = os.path.join(MODEL_DIR, 'lait_features.pkl')
+    if not os.path.exists(model_path) or not os.path.exists(features_path):
+        return None
+    
+    model = joblib.load(model_path)
+    feature_cols = joblib.load(features_path)
+    
+    # Récupérer les infos de la brebis
+    query = """
+        SELECT b.race, b.date_naissance,
+               AVG(m.score_global) as score_morpho,
+               AVG(m2.score_total) as score_mamelle
+        FROM brebis b
+        LEFT JOIN mesures_morpho m ON b.id = m.brebis_id
+        LEFT JOIN mesures_mamelles m2 ON b.id = m2.brebis_id
+        WHERE b.id = ?
+        GROUP BY b.id
+    """
+    row = db.fetchone(query, (brebis_id,))
+    if not row:
+        return None
+    
+    race, date_naiss, score_morpho, score_mamelle = row
+    age = (datetime.now() - datetime.strptime(date_naiss, "%Y-%m-%d")).days / 365 if date_naiss else 0
+    
+    # Créer un DataFrame avec les bonnes colonnes
+    data = {'score_morpho': score_morpho or 0, 'score_mamelle': score_mamelle or 0, 'age': age}
+    # Encodage one-hot de la race
+    for col in feature_cols:
+        if col.startswith('race_'):
+            data[col] = 1 if col == f"race_{race}" else 0
+        elif col not in data:
+            data[col] = 0
+    
+    X = pd.DataFrame([data])[feature_cols].fillna(0)
+    pred = model.predict(X)[0]
+    return pred
+
+def cluster_brebis(df, n_clusters=3):
+    """Applique un clustering KMeans sur les brebis."""
+    features = ['prod_moy (L/j)', 'score_morpho', 'poids', 'viande_estimee (kg)']
+    # Sélectionner les colonnes existantes
+    avail = [f for f in features if f in df.columns]
+    if len(avail) < 2:
+        return None
+    X = df[avail].fillna(0)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    clusters = kmeans.fit_predict(X_scaled)
+    return clusters, kmeans.cluster_centers_, avail
+
+def detect_anomalies(df, contamination=0.1):
+    """Détecte les anomalies avec IsolationForest."""
+    features = ['prod_moy (L/j)', 'score_morpho', 'poids', 'viande_estimee (kg)']
+    avail = [f for f in features if f in df.columns]
+    if len(avail) < 2:
+        return None
+    X = df[avail].fillna(0)
+    model = IsolationForest(contamination=contamination, random_state=42)
+    preds = model.fit_predict(X)  # -1 pour anomalies, 1 pour normaux
+    return preds
+
+# -----------------------------------------------------------------------------
 # PAGES DE L'APPLICATION
 # -----------------------------------------------------------------------------
 
@@ -631,6 +774,7 @@ def page_dashboard():
         ("📸 Photogrammétrie", "Mesures morphométriques IA", "analyse", Config.VERT),
         ("🥛 Prédiction Lait", "ML potentiel laitier", "prediction", Config.VIOLET),
         ("🌾 Nutrition", "Formulation rations", "nutrition_avancee", Config.BLEU),
+        ("🧠 IA & Data Mining", "Analyses avancées, clustering, anomalies", "ia", Config.ROUGE),
     ]
     
     cols = st.columns(3)
@@ -955,7 +1099,7 @@ def page_prediction():
         race = st.selectbox("Race", list(Config.RACES.keys()))
         age = st.number_input("Âge (années)", 1, 15, 4)
     
-    if st.button("🔮 Prédire production"):
+    if st.button("🔮 Prédire production (formule simple)"):
         pred = MachineLearning.predire_lait(score_mam, score_morpho, race, age)
         
         cols = st.columns(3)
@@ -970,9 +1114,256 @@ def page_prediction():
             title="Comparaison production laitière (L/jour)"
         )
         st.plotly_chart(fig, use_container_width=True)
+    
+    st.divider()
+    st.subheader("Prédiction avancée par modèle ML")
+    
+    # Vérifier si un modèle existe
+    model_path = os.path.join(MODEL_DIR, 'lait_model.pkl')
+    if os.path.exists(model_path):
+        st.success("Un modèle ML est disponible.")
+        # Sélectionner une brebis
+        params = [st.session_state.user_id]
+        query_brebis = """
+            SELECT b.id, b.numero_id, b.nom, e.nom
+            FROM brebis b
+            JOIN elevages e ON b.elevage_id = e.id
+            JOIN eleveurs el ON e.eleveur_id = el.id
+            WHERE el.user_id=?
+        """
+        query_brebis, params = filtrer_par_eleveur(query_brebis, params, join_eleveur=True)
+        brebis_list = db.fetchall(query_brebis, params)
+        brebis_dict = {f"{b[0]} - {b[1]} {b[2]} ({b[3]})": b[0] for b in brebis_list}
+        
+        if brebis_dict:
+            selected = st.selectbox("Choisir une brebis", list(brebis_dict.keys()), key="ml_brebis")
+            bid = brebis_dict[selected]
+            if st.button("Prédire avec ML"):
+                pred = predict_lait_ml(bid)
+                if pred is not None:
+                    st.metric("Production prédite (L/j)", f"{pred:.2f}")
+                else:
+                    st.warning("Impossible de faire la prédiction (données manquantes).")
+        else:
+            st.warning("Aucune brebis disponible.")
+    else:
+        st.info("Aucun modèle ML entraîné. Vous pouvez en entraîner un si vous avez suffisamment de données de production.")
+        if st.button("Entraîner un modèle ML"):
+            with st.spinner("Entraînement en cours..."):
+                result = train_lait_model()
+                if result is None:
+                    st.error("Pas assez de données (minimum 20 brebis avec productions).")
+                else:
+                    model, score = result
+                    st.success(f"Modèle entraîné avec un score R² de {score:.2f} sur le test.")
+
+def page_analyse():
+    st.title("📸 Analyse Photogrammétrique")
+
+    # Récupérer les brebis selon l'éleveur actif
+    params = [st.session_state.user_id]
+    query_brebis = """
+        SELECT b.id, b.numero_id, b.nom, e.nom, b.photo_profil, b.photo_mamelle
+        FROM brebis b
+        JOIN elevages e ON b.elevage_id = e.id
+        JOIN eleveurs el ON e.eleveur_id = el.id
+        WHERE el.user_id=?
+    """
+    query_brebis, params = filtrer_par_eleveur(query_brebis, params, join_eleveur=True)
+    brebis_list = db.fetchall(query_brebis, params)
+    brebis_dict = {f"{b[0]} - {b[1]} {b[2]} ({b[3]})": b[0] for b in brebis_list}
+
+    if not brebis_dict:
+        st.warning("Aucune brebis disponible pour cet éleveur.")
+        return
+
+    selected_brebis = st.selectbox("Sélectionner la brebis", list(brebis_dict.keys()))
+    brebis_id = brebis_dict[selected_brebis]
+
+    # Récupérer les infos de la brebis
+    brebis_info = db.fetchone("SELECT date_naissance, race, photo_profil, photo_mamelle FROM brebis WHERE id=?", (brebis_id,))
+    if brebis_info:
+        date_naiss = datetime.strptime(brebis_info[0], "%Y-%m-%d").date()
+        age_jours = (datetime.today().date() - date_naiss).days
+        age_mois = age_jours // 30
+        age_dents = "Inconnu"
+        if age_mois < 12:
+            age_dents = "Dents de lait"
+        elif age_mois < 24:
+            age_dents = "2 dents"
+        elif age_mois < 36:
+            age_dents = "4 dents"
+        else:
+            age_dents = "6 dents ou plus"
+        profil_file = brebis_info[2]
+        mamelle_file = brebis_info[3]
+    else:
+        age_mois = 0
+        age_dents = "Inconnu"
+        profil_file = None
+        mamelle_file = None
+
+    st.info(f"Âge estimé : {age_mois} mois ({age_dents})")
+
+    # Afficher la photo de profil existante si disponible
+    if profil_file and os.path.exists(os.path.join(PHOTO_DIR, profil_file)):
+        st.image(os.path.join(PHOTO_DIR, profil_file), caption="Photo de profil existante", width=300)
+
+    tab1, tab2 = st.tabs(["📏 Morphométrie Corps", "🥛 Analyse Mamelles"])
+
+    with tab1:
+        st.subheader("Mesures corporelles")
+
+        # Option de capture via caméra ou upload
+        source = st.radio("Source de l'image", ["Télécharger un fichier", "Prendre une photo"])
+        uploaded_files = None
+        camera_image = None
+        if source == "Télécharger un fichier":
+            uploaded_files = st.file_uploader("Photos de profil (plusieurs acceptées)", 
+                                              type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
+        else:
+            camera_image = st.camera_input("Prendre une photo")
+
+        # Afficher les images
+        if uploaded_files:
+            cols = st.columns(min(3, len(uploaded_files)))
+            for i, file in enumerate(uploaded_files):
+                with cols[i % 3]:
+                    img = Image.open(file)
+                    st.image(img, caption=f"Photo {i+1}", use_column_width=True)
+        if camera_image:
+            st.image(camera_image, caption="Photo prise", use_column_width=True)
+
+        # Saisie manuelle des mesures
+        col1, col2 = st.columns(2)
+        with col1:
+            etalon = st.selectbox("Étalon de calibration", 
+                                 list(Config.ETALONS.keys()),
+                                 format_func=lambda x: Config.ETALONS[x]['nom'])
+        with col2:
+            mode_age = st.radio("Mode d'âge", ["Mois", "Dentition"])
+            if mode_age == "Mois":
+                age_saisi = st.number_input("Âge (mois)", min_value=0, value=age_mois)
+            else:
+                age_saisi_dent = st.selectbox("Dentition", ["Dents de lait", "2 dents", "4 dents", "6 dents ou plus"])
+
+        longueur = st.number_input("Longueur corps (cm)", min_value=30.0, max_value=120.0, value=70.0)
+        hauteur = st.number_input("Hauteur garrot (cm)", min_value=30.0, max_value=90.0, value=65.0)
+        poitrine = st.number_input("Tour de poitrine (cm)", min_value=40.0, max_value=130.0, value=80.0)
+        canon = st.number_input("Circonférence canon (cm)", min_value=5.0, max_value=15.0, value=8.0)
+        bassin = st.number_input("Largeur bassin (cm)", min_value=10.0, max_value=40.0, value=20.0)
+
+        # Estimation du poids à partir des mensurations (formule approximative)
+        poids_estime = (longueur * poitrine * hauteur) / 3000
+        st.info(f"Poids estimé à partir des mensurations : **{poids_estime:.1f} kg**")
+
+        if st.button("🤖 Calculer score et analyser"):
+            # Score morphologique
+            score = OvinScience.calcul_score_morpho(longueur, hauteur, poitrine, canon, bassin)
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=score,
+                domain={'x': [0,1], 'y':[0,1]},
+                title={'text': "Score Morphologique"},
+                gauge={'axis': {'range': [None, 100]},
+                       'bar': {'color': Config.VERT if score>70 else Config.ORANGE if score>50 else Config.ROUGE},
+                       'steps': [
+                           {'range': [0,50], 'color': "lightgray"},
+                           {'range': [50,70], 'color': "yellow"},
+                           {'range': [70,100], 'color': "lightgreen"}]}
+            ))
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Sauvegarde dans la table mesures_morpho
+            if st.button("💾 Enregistrer ces mesures pour suivi"):
+                db.execute("""
+                    INSERT INTO mesures_morpho 
+                    (brebis_id, date_mesure, longueur_corps, hauteur_garrot, tour_poitrine,
+                     circonference_canon, largeur_bassin, score_global)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    brebis_id, datetime.now().isoformat(),
+                    longueur, hauteur, poitrine, canon, bassin, score
+                ))
+                st.success("Mesures enregistrées !")
+
+            # Analyse d'image avancée (simulation)
+            if uploaded_files or camera_image:
+                st.subheader("🔍 Diagnostic visuel (simulation IA)")
+                maladies = ["Aucune anomalie", "Légère boiterie", "Problème de mamelle", "État corporel faible"]
+                diag = random.choices(maladies, weights=[0.7, 0.1, 0.1, 0.1])[0]
+                etat_corporel = random.choice(["Maigre", "Idéal", "Gras"])
+                st.write(f"**Diagnostic :** {diag}")
+                st.write(f"**État corporel estimé :** {etat_corporel}")
+                if diag != "Aucune anomalie":
+                    st.warning(f"⚠️ Alerte : {diag} détecté. Consulter un vétérinaire.")
+                else:
+                    st.success("✅ Animal sain (simulation).")
+
+    with tab2:
+        st.subheader("Scoring mamelles")
+
+        # Afficher la photo mamelle existante si disponible
+        if mamelle_file and os.path.exists(os.path.join(PHOTO_DIR, mamelle_file)):
+            st.image(os.path.join(PHOTO_DIR, mamelle_file), caption="Mamelle existante", width=300)
+
+        # Nouvelle photo
+        mamelle_source = st.radio("Source image mamelle", ["Télécharger", "Prendre photo"], key="mamelle_source")
+        mamelle_file_upload = None
+        mamelle_camera = None
+        if mamelle_source == "Télécharger":
+            mamelle_file_upload = st.file_uploader("Vue arrière mamelles", type=['jpg','png','jpeg'], key="mamelle_img")
+        else:
+            mamelle_camera = st.camera_input("Prendre photo mamelle", key="mamelle_camera")
+
+        if mamelle_file_upload:
+            img_mam = Image.open(mamelle_file_upload)
+            st.image(img_mam, caption="Mamelle uploadée", width=300)
+        if mamelle_camera:
+            st.image(mamelle_camera, caption="Mamelle prise", width=300)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            long_trayon = st.number_input("Longueur trayon (cm)", min_value=1.0, max_value=15.0, value=5.0)
+            diam_trayon = st.number_input("Diamètre trayon (cm)", min_value=0.5, max_value=5.0, value=2.5)
+        with col2:
+            symetrie = st.selectbox("Symétrie", ["Symétrique", "Asymétrique"])
+            attache = st.selectbox("Attache", ["Solide", "Moyenne", "Pendante"])
+            forme = st.selectbox("Forme", ["Globuleuse", "Bifide", "Poire"])
+
+        if st.button("🥛 Calculer score mamelle"):
+            score = OvinScience.calcul_score_mamelle(long_trayon, diam_trayon, symetrie, attache, forme)
+            st.progress(score / 10)
+            st.metric("Score mamelles", f"{score}/10")
+            if score >= 8:
+                st.success("✅ Excellente conformation mammaire")
+            elif score >= 6:
+                st.info("ℹ️ Bonne conformation")
+            else:
+                st.warning("⚠️ Conformation à améliorer")
+
+            # Sauvegarde dans mesures_mamelles
+            if st.button("💾 Enregistrer mesures mamelles"):
+                db.execute("""
+                    INSERT INTO mesures_mamelles 
+                    (brebis_id, date_mesure, longueur_trayon, diametre_trayon, symetrie, attache, forme, score_total)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    brebis_id, datetime.now().isoformat(),
+                    long_trayon, diam_trayon, symetrie, attache, forme, score
+                ))
+                st.success("Mesures mamelles enregistrées !")
+
+            # Diagnostic mammaire (simulation)
+            if mamelle_file_upload or mamelle_camera:
+                st.subheader("🔍 Diagnostic mammaire (simulation IA)")
+                if score < 6 or forme == "Bifide" or attache == "Pendante":
+                    st.warning("Suspicion de problèmes mammaires. Consulter un vétérinaire.")
+                else:
+                    st.success("Aspect sain (simulation).")
 
 # -----------------------------------------------------------------------------
-# PAGE GESTION ÉLEVAGE (avec gestion des photos en fichiers)
+# PAGE GESTION ÉLEVAGE (identique à avant, mais nous devons la recopier pour être complet)
 # -----------------------------------------------------------------------------
 def page_gestion_elevage():
     st.title("🐑 Gestion des élevages")
@@ -1157,7 +1548,7 @@ def page_gestion_elevage():
                 st.info("Aucune brebis enregistrée.")
 
 # -----------------------------------------------------------------------------
-# PAGE PRODUCTION LAITIÈRE
+# PAGE PRODUCTION LAITIÈRE (identique à avant, mais recopiée pour complétude)
 # -----------------------------------------------------------------------------
 def page_production():
     st.title("🥛 Production laitière et analyses biochimiques")
@@ -1288,7 +1679,7 @@ def page_production():
             st.info("Aucune analyse biochimique.")
 
 # -----------------------------------------------------------------------------
-# PAGE GÉNOMIQUE AVANCÉE (corrigée)
+# PAGE GÉNOMIQUE AVANCÉE (corrigée, avec les modifications)
 # -----------------------------------------------------------------------------
 def page_genomique_avancee():
     st.title("🧬 Génomique avancée")
@@ -1453,216 +1844,7 @@ def page_genomique_avancee():
                 st.error(f"Erreur lors de l'analyse : {e}")
 
 # -----------------------------------------------------------------------------
-# PAGE PHOTOGRAMMÉTRIE AMÉLIORÉE (avec affichage des photos depuis fichiers)
-# -----------------------------------------------------------------------------
-def page_analyse():
-    st.title("📸 Analyse Photogrammétrique")
-
-    # Récupérer les brebis selon l'éleveur actif
-    params = [st.session_state.user_id]
-    query_brebis = """
-        SELECT b.id, b.numero_id, b.nom, e.nom, b.photo_profil, b.photo_mamelle
-        FROM brebis b
-        JOIN elevages e ON b.elevage_id = e.id
-        JOIN eleveurs el ON e.eleveur_id = el.id
-        WHERE el.user_id=?
-    """
-    query_brebis, params = filtrer_par_eleveur(query_brebis, params, join_eleveur=True)
-    brebis_list = db.fetchall(query_brebis, params)
-    brebis_dict = {f"{b[0]} - {b[1]} {b[2]} ({b[3]})": b[0] for b in brebis_list}
-
-    if not brebis_dict:
-        st.warning("Aucune brebis disponible pour cet éleveur.")
-        return
-
-    selected_brebis = st.selectbox("Sélectionner la brebis", list(brebis_dict.keys()))
-    brebis_id = brebis_dict[selected_brebis]
-
-    # Récupérer les infos de la brebis
-    brebis_info = db.fetchone("SELECT date_naissance, race, photo_profil, photo_mamelle FROM brebis WHERE id=?", (brebis_id,))
-    if brebis_info:
-        date_naiss = datetime.strptime(brebis_info[0], "%Y-%m-%d").date()
-        age_jours = (datetime.today().date() - date_naiss).days
-        age_mois = age_jours // 30
-        age_dents = "Inconnu"
-        if age_mois < 12:
-            age_dents = "Dents de lait"
-        elif age_mois < 24:
-            age_dents = "2 dents"
-        elif age_mois < 36:
-            age_dents = "4 dents"
-        else:
-            age_dents = "6 dents ou plus"
-        profil_file = brebis_info[2]
-        mamelle_file = brebis_info[3]
-    else:
-        age_mois = 0
-        age_dents = "Inconnu"
-        profil_file = None
-        mamelle_file = None
-
-    st.info(f"Âge estimé : {age_mois} mois ({age_dents})")
-
-    # Afficher la photo de profil existante si disponible
-    if profil_file and os.path.exists(os.path.join(PHOTO_DIR, profil_file)):
-        st.image(os.path.join(PHOTO_DIR, profil_file), caption="Photo de profil existante", width=300)
-
-    tab1, tab2 = st.tabs(["📏 Morphométrie Corps", "🥛 Analyse Mamelles"])
-
-    with tab1:
-        st.subheader("Mesures corporelles")
-
-        # Option de capture via caméra ou upload
-        source = st.radio("Source de l'image", ["Télécharger un fichier", "Prendre une photo"])
-        uploaded_files = None
-        camera_image = None
-        if source == "Télécharger un fichier":
-            uploaded_files = st.file_uploader("Photos de profil (plusieurs acceptées)", 
-                                              type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
-        else:
-            camera_image = st.camera_input("Prendre une photo")
-
-        # Afficher les images
-        if uploaded_files:
-            cols = st.columns(min(3, len(uploaded_files)))
-            for i, file in enumerate(uploaded_files):
-                with cols[i % 3]:
-                    img = Image.open(file)
-                    st.image(img, caption=f"Photo {i+1}", use_column_width=True)
-        if camera_image:
-            st.image(camera_image, caption="Photo prise", use_column_width=True)
-
-        # Saisie manuelle des mesures
-        col1, col2 = st.columns(2)
-        with col1:
-            etalon = st.selectbox("Étalon de calibration", 
-                                 list(Config.ETALONS.keys()),
-                                 format_func=lambda x: Config.ETALONS[x]['nom'])
-        with col2:
-            mode_age = st.radio("Mode d'âge", ["Mois", "Dentition"])
-            if mode_age == "Mois":
-                age_saisi = st.number_input("Âge (mois)", min_value=0, value=age_mois)
-            else:
-                age_saisi_dent = st.selectbox("Dentition", ["Dents de lait", "2 dents", "4 dents", "6 dents ou plus"])
-
-        longueur = st.number_input("Longueur corps (cm)", min_value=30.0, max_value=120.0, value=70.0)
-        hauteur = st.number_input("Hauteur garrot (cm)", min_value=30.0, max_value=90.0, value=65.0)
-        poitrine = st.number_input("Tour de poitrine (cm)", min_value=40.0, max_value=130.0, value=80.0)
-        canon = st.number_input("Circonférence canon (cm)", min_value=5.0, max_value=15.0, value=8.0)
-        bassin = st.number_input("Largeur bassin (cm)", min_value=10.0, max_value=40.0, value=20.0)
-
-        # Estimation du poids à partir des mensurations (formule approximative)
-        poids_estime = (longueur * poitrine * hauteur) / 3000
-        st.info(f"Poids estimé à partir des mensurations : **{poids_estime:.1f} kg**")
-
-        if st.button("🤖 Calculer score et analyser"):
-            # Score morphologique
-            score = OvinScience.calcul_score_morpho(longueur, hauteur, poitrine, canon, bassin)
-            fig = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=score,
-                domain={'x': [0,1], 'y':[0,1]},
-                title={'text': "Score Morphologique"},
-                gauge={'axis': {'range': [None, 100]},
-                       'bar': {'color': Config.VERT if score>70 else Config.ORANGE if score>50 else Config.ROUGE},
-                       'steps': [
-                           {'range': [0,50], 'color': "lightgray"},
-                           {'range': [50,70], 'color': "yellow"},
-                           {'range': [70,100], 'color': "lightgreen"}]}
-            ))
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Sauvegarde dans la table mesures_morpho
-            if st.button("💾 Enregistrer ces mesures pour suivi"):
-                db.execute("""
-                    INSERT INTO mesures_morpho 
-                    (brebis_id, date_mesure, longueur_corps, hauteur_garrot, tour_poitrine,
-                     circonference_canon, largeur_bassin, score_global)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    brebis_id, datetime.now().isoformat(),
-                    longueur, hauteur, poitrine, canon, bassin, score
-                ))
-                st.success("Mesures enregistrées !")
-
-            # Analyse d'image avancée (simulation)
-            if uploaded_files or camera_image:
-                st.subheader("🔍 Diagnostic visuel (simulation IA)")
-                import random
-                maladies = ["Aucune anomalie", "Légère boiterie", "Problème de mamelle", "État corporel faible"]
-                diag = random.choices(maladies, weights=[0.7, 0.1, 0.1, 0.1])[0]
-                etat_corporel = random.choice(["Maigre", "Idéal", "Gras"])
-                st.write(f"**Diagnostic :** {diag}")
-                st.write(f"**État corporel estimé :** {etat_corporel}")
-                if diag != "Aucune anomalie":
-                    st.warning(f"⚠️ Alerte : {diag} détecté. Consulter un vétérinaire.")
-                else:
-                    st.success("✅ Animal sain (simulation).")
-
-    with tab2:
-        st.subheader("Scoring mamelles")
-
-        # Afficher la photo mamelle existante si disponible
-        if mamelle_file and os.path.exists(os.path.join(PHOTO_DIR, mamelle_file)):
-            st.image(os.path.join(PHOTO_DIR, mamelle_file), caption="Mamelle existante", width=300)
-
-        # Nouvelle photo
-        mamelle_source = st.radio("Source image mamelle", ["Télécharger", "Prendre photo"], key="mamelle_source")
-        mamelle_file_upload = None
-        mamelle_camera = None
-        if mamelle_source == "Télécharger":
-            mamelle_file_upload = st.file_uploader("Vue arrière mamelles", type=['jpg','png','jpeg'], key="mamelle_img")
-        else:
-            mamelle_camera = st.camera_input("Prendre photo mamelle", key="mamelle_camera")
-
-        if mamelle_file_upload:
-            img_mam = Image.open(mamelle_file_upload)
-            st.image(img_mam, caption="Mamelle uploadée", width=300)
-        if mamelle_camera:
-            st.image(mamelle_camera, caption="Mamelle prise", width=300)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            long_trayon = st.number_input("Longueur trayon (cm)", min_value=1.0, max_value=15.0, value=5.0)
-            diam_trayon = st.number_input("Diamètre trayon (cm)", min_value=0.5, max_value=5.0, value=2.5)
-        with col2:
-            symetrie = st.selectbox("Symétrie", ["Symétrique", "Asymétrique"])
-            attache = st.selectbox("Attache", ["Solide", "Moyenne", "Pendante"])
-            forme = st.selectbox("Forme", ["Globuleuse", "Bifide", "Poire"])
-
-        if st.button("🥛 Calculer score mamelle"):
-            score = OvinScience.calcul_score_mamelle(long_trayon, diam_trayon, symetrie, attache, forme)
-            st.progress(score / 10)
-            st.metric("Score mamelles", f"{score}/10")
-            if score >= 8:
-                st.success("✅ Excellente conformation mammaire")
-            elif score >= 6:
-                st.info("ℹ️ Bonne conformation")
-            else:
-                st.warning("⚠️ Conformation à améliorer")
-
-            # Sauvegarde dans mesures_mamelles
-            if st.button("💾 Enregistrer mesures mamelles"):
-                db.execute("""
-                    INSERT INTO mesures_mamelles 
-                    (brebis_id, date_mesure, longueur_trayon, diametre_trayon, symetrie, attache, forme, score_total)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    brebis_id, datetime.now().isoformat(),
-                    long_trayon, diam_trayon, symetrie, attache, forme, score
-                ))
-                st.success("Mesures mamelles enregistrées !")
-
-            # Diagnostic mammaire (simulation)
-            if mamelle_file_upload or mamelle_camera:
-                st.subheader("🔍 Diagnostic mammaire (simulation IA)")
-                if score < 6 or forme == "Bifide" or attache == "Pendante":
-                    st.warning("Suspicion de problèmes mammaires. Consulter un vétérinaire.")
-                else:
-                    st.success("Aspect sain (simulation).")
-
-# -----------------------------------------------------------------------------
-# PAGE SANTÉ
+# PAGE SANTÉ (identique)
 # -----------------------------------------------------------------------------
 def page_sante():
     st.title("🏥 Suivi sanitaire et vaccinal")
@@ -1740,7 +1922,7 @@ def page_sante():
             st.info("Aucun soin enregistré.")
 
 # -----------------------------------------------------------------------------
-# PAGE REPRODUCTION
+# PAGE REPRODUCTION (identique)
 # -----------------------------------------------------------------------------
 def page_reproduction():
     st.title("🤰 Gestion de la reproduction")
@@ -1845,71 +2027,24 @@ def page_reproduction():
             st.dataframe(df, use_container_width=True, hide_index=True)
 
 # -----------------------------------------------------------------------------
-# PAGE NUTRITION AVANCÉE
+# PAGE NUTRITION AVANCÉE (avec optimisation)
 # -----------------------------------------------------------------------------
 def page_nutrition_avancee():
     st.title("🌾 Nutrition avancée et formulation")
-
-    # -------------------------------------------------------------------------
-    # Initialisation : si la table aliments est vide, on la remplit avec des données par défaut (marché algérien)
-    # -------------------------------------------------------------------------
-    cursor = db.conn.execute("SELECT COUNT(*) FROM aliments")
-    count = cursor.fetchone()[0]
-    if count == 0:
-        aliments_defaut = [
-            ("Orge", "Concentré", 1.15, 85, 86, 40),      # UEM, PDIN, MS%, prix DA/kg
-            ("Maïs", "Concentré", 1.30, 95, 87, 45),
-            ("Son de blé", "Concentré", 0.90, 120, 87, 25),
-            ("Tourteau de soja", "Concentré", 1.20, 450, 88, 80),
-            ("Foin de luzerne", "Fourrage", 0.70, 120, 85, 30),
-            ("Paille de blé", "Fourrage", 0.45, 25, 88, 10),
-            ("Betterave (pulpe)", "Fourrage", 0.95, 80, 90, 35),
-            ("Mélasse", "Autre", 0.85, 50, 75, 20),
-            ("CMV (complément)", "Minéral", 0.0, 0, 100, 150)
-        ]
-        for alim in aliments_defaut:
-            db.execute(
-                "INSERT INTO aliments (nom, type, uem, pdin, ms, prix_kg) VALUES (?, ?, ?, ?, ?, ?)",
-                alim
-            )
-        st.info("📦 Catalogue d'aliments initialisé avec les produits du marché algérien.")
 
     tab1, tab2, tab3 = st.tabs(["📦 Catalogue aliments", "📋 Rations types", "🧮 Calcul ration personnalisée"])
 
     with tab1:
         st.subheader("Gestion des aliments")
-        st.markdown("""
-        **Aliments disponibles** (valeurs nutritionnelles indicatives).  
-        Vous pouvez modifier les prix en temps réel pour refléter le marché.
-        """)
 
-        # Afficher le tableau avec possibilité d'éditer les prix
-        aliments = db.fetchall("SELECT id, nom, type, uem, pdin, ms, prix_kg FROM aliments ORDER BY type, nom")
-        if aliments:
-            df_alim = pd.DataFrame(aliments, columns=["ID", "Nom", "Type", "UEM", "PDIN", "MS%", "Prix (DA/kg)"])
-            st.dataframe(df_alim, use_container_width=True, hide_index=True)
-
-            # Modification de prix
-            with st.expander("💰 Modifier les prix"):
-                choix = st.selectbox("Choisir un aliment", [f"{a[0]} - {a[1]}" for a in aliments], key="edit_prix")
-                aid = int(choix.split(" - ")[0])
-                nouveau_prix = st.number_input("Nouveau prix (DA/kg)", min_value=0.0, step=1.0, format="%.2f")
-                if st.button("Mettre à jour"):
-                    db.execute("UPDATE aliments SET prix_kg=? WHERE id=?", (nouveau_prix, aid))
-                    st.success("Prix mis à jour")
-                    st.rerun()
-        else:
-            st.info("Aucun aliment enregistré.")
-
-        # Ajout d'un nouvel aliment
-        with st.expander("➕ Ajouter un aliment personnalisé"):
+        with st.expander("➕ Ajouter un aliment"):
             with st.form("form_aliment"):
                 nom = st.text_input("Nom de l'aliment")
                 type_alim = st.selectbox("Type", ["Fourrage", "Concentré", "Minéral", "Autre"])
-                uem = st.number_input("UEM (MJ/kg MS)", min_value=0.0, step=0.1, format="%.2f")
-                pdin = st.number_input("PDIN (g/kg MS)", min_value=0.0, step=1.0)
+                uem = st.number_input("UEM (MJ/kg)", min_value=0.0, step=0.1, format="%.2f")
+                pdin = st.number_input("PDIN (g/kg)", min_value=0.0, step=1.0)
                 ms = st.number_input("Matière sèche (%)", min_value=0.0, max_value=100.0, value=85.0, step=1.0)
-                prix = st.number_input("Prix (DA/kg brut)", min_value=0.0, step=1.0, format="%.2f")
+                prix = st.number_input("Prix (DA/kg)", min_value=0.0, step=1.0, format="%.2f")
                 if st.form_submit_button("Ajouter"):
                     try:
                         db.execute(
@@ -1921,13 +2056,27 @@ def page_nutrition_avancee():
                     except sqlite3.IntegrityError:
                         st.error("Cet aliment existe déjà.")
 
+        aliments = db.fetchall("SELECT id, nom, type, uem, pdin, ms, prix_kg FROM aliments")
+        if aliments:
+            df_alim = pd.DataFrame(aliments, columns=["ID", "Nom", "Type", "UEM", "PDIN", "MS%", "Prix DA/kg"])
+            st.dataframe(df_alim, use_container_width=True, hide_index=True)
+
+            with st.expander("💰 Modifier un prix"):
+                choix = st.selectbox("Choisir un aliment", [f"{a[0]} - {a[1]}" for a in aliments])
+                aid = int(choix.split(" - ")[0])
+                nouveau_prix = st.number_input("Nouveau prix (DA/kg)", min_value=0.0, step=1.0)
+                if st.button("Mettre à jour"):
+                    db.execute("UPDATE aliments SET prix_kg=? WHERE id=?", (nouveau_prix, aid))
+                    st.success("Prix mis à jour")
+                    st.rerun()
+        else:
+            st.info("Aucun aliment enregistré. Commencez par en ajouter.")
+
     with tab2:
         st.subheader("Rations types par état physiologique")
-        st.markdown("Sélectionnez un état pour voir la ration recommandée (basée sur des moyennes algériennes).")
 
         etat_physio = st.selectbox("État physiologique", Config.ETATS_PHYSIO)
 
-        # Vérifier si une ration existe déjà pour cet état
         ration_existante = db.fetchone("SELECT id, nom, description FROM rations WHERE etat_physio=?", (etat_physio,))
         if ration_existante:
             st.success(f"Ration existante : {ration_existante[1]}")
@@ -1938,8 +2087,8 @@ def page_nutrition_avancee():
                 WHERE rc.ration_id=?
             """, (ration_existante[0],))
             if compo:
-                df_compo = pd.DataFrame(compo, columns=["Aliment", "Quantité (kg brut/jour)", "Prix/kg"])
-                df_compo["Coût (DA/jour)"] = df_compo["Quantité (kg brut/jour)"] * df_compo["Prix/kg"]
+                df_compo = pd.DataFrame(compo, columns=["Aliment", "Quantité (kg/jour)", "Prix/kg"])
+                df_compo["Coût (DA/jour)"] = df_compo["Quantité (kg/jour)"] * df_compo["Prix/kg"]
                 st.dataframe(df_compo, use_container_width=True, hide_index=True)
                 total_journalier = df_compo["Coût (DA/jour)"].sum()
                 st.metric("Coût total journalier", f"{total_journalier:.2f} DA")
@@ -1948,9 +2097,8 @@ def page_nutrition_avancee():
         else:
             st.info("Aucune ration définie pour cet état.")
 
-        # Configuration/modification d'une ration
         with st.expander("⚙️ Configurer une ration pour cet état"):
-            aliments = db.fetchall("SELECT id, nom FROM aliments ORDER BY nom")
+            aliments = db.fetchall("SELECT id, nom FROM aliments")
             if not aliments:
                 st.warning("Ajoutez d'abord des aliments.")
             else:
@@ -1970,23 +2118,10 @@ def page_nutrition_avancee():
                     ration_id = None
 
                 if ration_id:
-                    # Afficher la composition actuelle
-                    compo_actuelle = db.fetchall("""
-                        SELECT rc.id, a.nom, rc.quantite_kg
-                        FROM ration_composition rc
-                        JOIN aliments a ON rc.aliment_id = a.id
-                        WHERE rc.ration_id=?
-                    """, (ration_id,))
-                    if compo_actuelle:
-                        st.markdown("**Composition actuelle :**")
-                        for c in compo_actuelle:
-                            st.write(f"- {c[1]} : {c[2]} kg/jour")
-
-                    # Ajout d'un aliment
                     st.subheader("Ajouter un aliment à cette ration")
-                    aliment_choix = st.selectbox("Choisir un aliment", [f"{a[0]} - {a[1]}" for a in aliments], key="add_alim")
+                    aliment_choix = st.selectbox("Choisir un aliment", [f"{a[0]} - {a[1]}" for a in aliments])
                     aid = int(aliment_choix.split(" - ")[0])
-                    quantite = st.number_input("Quantité (kg brut/jour)", min_value=0.0, step=0.1, format="%.2f")
+                    quantite = st.number_input("Quantité (kg/jour)", min_value=0.0, step=0.1, format="%.2f")
                     if st.button("Ajouter à la ration"):
                         existing = db.fetchone(
                             "SELECT id FROM ration_composition WHERE ration_id=? AND aliment_id=?",
@@ -2005,7 +2140,6 @@ def page_nutrition_avancee():
                         st.success("Aliment ajouté/modifié")
                         st.rerun()
 
-                    # Suppression d'un aliment
                     with st.expander("🗑️ Supprimer un aliment de la ration"):
                         compo = db.fetchall("""
                             SELECT rc.id, a.nom FROM ration_composition rc
@@ -2013,7 +2147,7 @@ def page_nutrition_avancee():
                             WHERE rc.ration_id=?
                         """, (ration_id,))
                         if compo:
-                            choix_suppr = st.selectbox("Aliment à retirer", [f"{c[0]} - {c[1]}" for c in compo], key="del_alim")
+                            choix_suppr = st.selectbox("Aliment à retirer", [f"{c[0]} - {c[1]}" for c in compo])
                             suppr_id = int(choix_suppr.split(" - ")[0])
                             if st.button("Retirer"):
                                 db.execute("DELETE FROM ration_composition WHERE id=?", (suppr_id,))
@@ -2022,9 +2156,8 @@ def page_nutrition_avancee():
 
     with tab3:
         st.subheader("Calcul de ration personnalisée")
-        st.markdown("Calculez la ration optimale pour une brebis spécifique ou une situation type, avec estimation du coût journalier en dinars algériens.")
 
-        # Sélection d'une brebis (optionnel)
+        # Récupérer les brebis de l'éleveur actif
         params = [st.session_state.user_id]
         query_brebis = """
             SELECT b.id, b.numero_id, b.nom, b.etat_physio, b.poids_vif
@@ -2051,107 +2184,142 @@ def page_nutrition_avancee():
             else:
                 poids_def = 50.0
                 etat_def = "Tarie"
-        else:
-            poids_def = 50.0
-            etat_def = "Tarie"
 
-        col1, col2 = st.columns(2)
-        with col1:
-            poids = st.number_input("Poids vif (kg)", min_value=10.0, max_value=150.0, value=poids_def)
-        with col2:
-            etat = st.selectbox("État physiologique", Config.ETATS_PHYSIO, index=Config.ETATS_PHYSIO.index(etat_def) if etat_def in Config.ETATS_PHYSIO else 0)
+            col1, col2 = st.columns(2)
+            with col1:
+                poids = st.number_input("Poids vif (kg)", min_value=10.0, max_value=150.0, value=poids_def)
+            with col2:
+                etat = st.selectbox("État physiologique", Config.ETATS_PHYSIO, index=Config.ETATS_PHYSIO.index(etat_def) if etat_def in Config.ETATS_PHYSIO else 0)
 
-        lactation = st.number_input("Production laitière (L/j)", min_value=0.0, value=0.0, step=0.5)
+            lactation = st.number_input("Production laitière (L/j)", min_value=0.0, value=0.0, step=0.5)
 
-        # Calcul des besoins
-        besoins = OvinScience.besoins_nutritionnels(poids, etat, lactation)
-        st.info(f"**Besoins journaliers** : UEM = {besoins['uem']} MJ, PDIN = {besoins['pdin']} g, MS = {besoins['ms']} kg")
+            besoins = OvinScience.besoins_nutritionnels(poids, etat, lactation)
+            st.info(f"**Besoins journaliers** : UEM = {besoins['uem']} MJ, PDIN = {besoins['pdin']} g, MS = {besoins['ms']} kg")
 
-        # Récupérer tous les aliments disponibles
-        aliments = db.fetchall("SELECT id, nom, type, uem, pdin, ms, prix_kg FROM aliments ORDER BY nom")
-        if not aliments:
-            st.warning("Ajoutez d'abord des aliments.")
-        else:
-            st.subheader("Composition de la ration (en kg brut)")
+            aliments = db.fetchall("SELECT id, nom, type, uem, pdin, ms, prix_kg FROM aliments")
+            if not aliments:
+                st.warning("Ajoutez d'abord des aliments.")
+            else:
+                # Deux modes : manuel ou optimisation automatique
+                mode_ration = st.radio("Mode de composition", ["Manuel", "Optimisation automatique (coût minimum)"])
 
-            # Dictionnaire pour stocker les quantités saisies
-            qtes = {}
-            cols = st.columns(2)
-            for idx, alim in enumerate(aliments):
-                with cols[idx % 2]:
-                    with st.container():
-                        st.markdown(f"**{alim[1]}** ({alim[2]})")
-                        st.caption(f"UEM:{alim[3]} | PDIN:{alim[4]} | MS:{alim[5]}% | {alim[6]} DA/kg")
-                        qte = st.number_input(
-                            "kg brut/jour",
-                            min_value=0.0,
-                            step=0.1,
-                            format="%.2f",
-                            key=f"qte_{alim[0]}"
-                        )
-                        if qte > 0:
-                            qtes[alim[0]] = {
-                                "nom": alim[1],
-                                "qte_brut": qte,
-                                "ms_pct": alim[5] / 100,
-                                "uem": alim[3],
-                                "pdin": alim[4],
-                                "prix_kg": alim[6]
-                            }
+                if mode_ration == "Manuel":
+                    st.subheader("Composition de la ration")
+                    ration_temp = {}
+                    for alim in aliments:
+                        with st.expander(f"{alim[1]} ({alim[2]}) - {alim[6]} DA/kg"):
+                            qte = st.number_input(f"Quantité (kg MS)", min_value=0.0, step=0.1, key=f"qte_{alim[0]}")
+                            if qte > 0:
+                                ration_temp[alim[0]] = {
+                                    "nom": alim[1],
+                                    "qte": qte,
+                                    "uem": alim[3],
+                                    "pdin": alim[4],
+                                    "ms": alim[5],
+                                    "prix": alim[6]
+                                }
 
-            if qtes and st.button("Calculer la ration"):
-                # Calcul des apports
-                total_uem = 0
-                total_pdin = 0
-                total_ms = 0
-                total_prix = 0
-                lignes = []
-                for aid, vals in qtes.items():
-                    qte_ms = vals["qte_brut"] * vals["ms_pct"]
-                    apport_uem = qte_ms * vals["uem"]
-                    apport_pdin = qte_ms * vals["pdin"]
-                    cout = vals["qte_brut"] * vals["prix_kg"]
-                    total_uem += apport_uem
-                    total_pdin += apport_pdin
-                    total_ms += qte_ms
-                    total_prix += cout
-                    lignes.append({
-                        "Aliment": vals["nom"],
-                        "kg brut": round(vals["qte_brut"], 2),
-                        "kg MS": round(qte_ms, 2),
-                        "UEM": round(apport_uem, 2),
-                        "PDIN (g)": round(apport_pdin, 2),
-                        "Coût (DA)": round(cout, 2)
-                    })
+                    if ration_temp and st.button("Calculer la ration"):
+                        total_uem = sum(v["qte"] * v["uem"] for v in ration_temp.values())
+                        total_pdin = sum(v["qte"] * v["pdin"] for v in ration_temp.values())
+                        total_ms = sum(v["qte"] for v in ration_temp.values())
+                        total_prix = sum(v["qte"] * v["prix"] for v in ration_temp.values())
 
-                st.subheader("Résultats détaillés")
-                st.dataframe(pd.DataFrame(lignes), use_container_width=True, hide_index=True)
+                        st.subheader("Résultats")
+                        cola, colb, colc = st.columns(3)
+                        cola.metric("UEM apportée", f"{total_uem:.2f} MJ", delta=f"{total_uem - besoins['uem']:.2f}")
+                        colb.metric("PDIN apportée", f"{total_pdin:.2f} g", delta=f"{total_pdin - besoins['pdin']:.2f}")
+                        colc.metric("MS apportée", f"{total_ms:.2f} kg", delta=f"{total_ms - besoins['ms']:.2f}")
 
-                st.subheader("Synthèse")
-                cola, colb, colc = st.columns(3)
-                cola.metric("UEM apportée", f"{total_uem:.2f} MJ", delta=f"{total_uem - besoins['uem']:.2f}")
-                colb.metric("PDIN apportée", f"{total_pdin:.2f} g", delta=f"{total_pdin - besoins['pdin']:.2f}")
-                colc.metric("MS apportée", f"{total_ms:.2f} kg", delta=f"{total_ms - besoins['ms']:.2f}")
+                        st.metric("Coût journalier", f"{total_prix:.2f} DA")
 
-                st.metric("💰 Coût journalier total", f"{total_prix:.2f} DA")
+                        if total_uem < besoins['uem'] * 0.9:
+                            st.warning("⚠️ Apport énergétique insuffisant")
+                        elif total_uem > besoins['uem'] * 1.1:
+                            st.warning("⚠️ Excès d'énergie")
+                        else:
+                            st.success("✅ Énergie équilibrée")
 
-                # Vérification équilibre
-                if total_uem < besoins['uem'] * 0.9:
-                    st.warning("⚠️ Apport énergétique insuffisant")
-                elif total_uem > besoins['uem'] * 1.1:
-                    st.warning("⚠️ Excès d'énergie")
+                        if total_pdin < besoins['pdin'] * 0.9:
+                            st.warning("⚠️ Apport protéique insuffisant")
+                        elif total_pdin > besoins['pdin'] * 1.1:
+                            st.warning("⚠️ Excès de protéines")
+                        else:
+                            st.success("✅ Protéines équilibrées")
                 else:
-                    st.success("✅ Énergie équilibrée")
+                    # Optimisation automatique
+                    st.subheader("Optimisation de la ration (coût minimum)")
 
-                if total_pdin < besoins['pdin'] * 0.9:
-                    st.warning("⚠️ Apport protéique insuffisant")
-                elif total_pdin > besoins['pdin'] * 1.1:
-                    st.warning("⚠️ Excès de protéines")
-                else:
-                    st.success("✅ Protéines équilibrées")
+                    # Préparer les données pour l'optimisation
+                    n = len(aliments)
+                    c = [a[6] for a in aliments]  # prix
+                    # Matrice des contraintes A_ub * x <= b_ub
+                    # On veut : somme(x_i * uem_i) >= besoin_uem  =>  -somme(...) <= -besoin
+                    # De même pour PDIN
+                    # Pour MS : somme(x_i * ms_i/100) <= besoin_ms (car ms est en %)
+                    A_ub = []
+                    b_ub = []
+                    # UEM (>=)
+                    A_ub.append([-a[3] for a in aliments])
+                    b_ub.append(-besoins['uem'])
+                    # PDIN (>=)
+                    A_ub.append([-a[4] for a in aliments])
+                    b_ub.append(-besoins['pdin'])
+                    # MS (<=)
+                    A_ub.append([a[5]/100 for a in aliments])  # convertir % en fraction
+                    b_ub.append(besoins['ms'])
+
+                    # Bornes : x_i >= 0
+                    bounds = [(0, None) for _ in range(n)]
+
+                    # Tolérance optionnelle : on peut ajouter des marges
+                    tolerance = st.slider("Tolérance sur les besoins (%)", 0, 20, 10) / 100
+                    # On ajuste les b_ub pour UEM et PDIN avec la tolérance
+                    # UEM : on veut >= besoin*(1-tol) pour être sûr de couvrir
+                    b_ub[0] = -besoins['uem'] * (1 - tolerance)
+                    b_ub[1] = -besoins['pdin'] * (1 - tolerance)
+                    # MS : on veut <= besoin*(1+tol) pour éviter excès
+                    b_ub[2] = besoins['ms'] * (1 + tolerance)
+
+                    # Résoudre
+                    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+
+                    if res.success:
+                        quantites = res.x
+                        # Filtrer les aliments avec quantité > 0.01
+                        ration_opt = []
+                        for i, q in enumerate(quantites):
+                            if q > 0.01:
+                                ration_opt.append({
+                                    "nom": aliments[i][1],
+                                    "qte": q,
+                                    "uem": aliments[i][3],
+                                    "pdin": aliments[i][4],
+                                    "ms": aliments[i][5],
+                                    "prix": aliments[i][6]
+                                })
+                        if ration_opt:
+                            df_opt = pd.DataFrame(ration_opt)
+                            df_opt["Coût (DA/jour)"] = df_opt["qte"] * df_opt["prix"]
+                            st.dataframe(df_opt[["nom", "qte", "Coût (DA/jour)"]].round(2), use_container_width=True, hide_index=True)
+                            total_opt = df_opt["Coût (DA/jour)"].sum()
+                            st.metric("Coût optimal journalier", f"{total_opt:.2f} DA")
+                            # Vérification
+                            uem_tot = sum(q * aliments[i][3] for i, q in enumerate(quantites))
+                            pdin_tot = sum(q * aliments[i][4] for i, q in enumerate(quantites))
+                            ms_tot = sum(q * aliments[i][5]/100 for i, q in enumerate(quantites))
+                            st.write(f"UEM apportée : {uem_tot:.2f} MJ (besoin {besoins['uem']})")
+                            st.write(f"PDIN apportée : {pdin_tot:.2f} g (besoin {besoins['pdin']})")
+                            st.write(f"MS apportée : {ms_tot:.2f} kg (max {besoins['ms']* (1+tolerance):.2f})")
+                        else:
+                            st.warning("Aucun aliment sélectionné par l'optimisation.")
+                    else:
+                        st.error("Impossible de trouver une solution optimale. Vérifiez les contraintes ou ajoutez des aliments.")
+        else:
+            st.info("Aucune brebis disponible. Vous pouvez utiliser 'Personnalisé'.")
 
 # -----------------------------------------------------------------------------
-# PAGE EXPORT (avec inclusion des photos)
+# PAGE EXPORT (identique)
 # -----------------------------------------------------------------------------
 def page_export():
     st.title("📤 Export des données")
@@ -2277,7 +2445,7 @@ def page_export():
             )
 
 # -----------------------------------------------------------------------------
-# PAGE ÉLITE ET COMPARAISON
+# PAGE ÉLITE ET COMPARAISON (inchangée)
 # -----------------------------------------------------------------------------
 def page_elite():
     st.title("🏆 Élite et comparaison")
@@ -2373,6 +2541,168 @@ def page_elite():
         fig2 = px.bar(df_eleveur, x="eleveur", y=["prod_moy (L/j)", "score_morpho", "rendement (%)"], 
                      barmode="group", title="Performances moyennes par éleveur")
         st.plotly_chart(fig2, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# NOUVELLE PAGE IA & DATA MINING
+# -----------------------------------------------------------------------------
+def page_ia():
+    st.title("🧠 Intelligence Artificielle & Data Mining")
+    st.markdown("Analyses avancées basées sur les données de votre élevage.")
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📈 Prédiction laitière avancée",
+        "🔍 Détection d'anomalies",
+        "📊 Clustering des brebis",
+        "📂 Analyse exploratoire (import)"
+    ])
+
+    # --- Onglet 1 : Prédiction laitière avancée ---
+    with tab1:
+        st.subheader("Prédiction de production laitière par modèle ML")
+        # Vérifier si un modèle existe
+        model_path = os.path.join(MODEL_DIR, 'lait_model.pkl')
+        if os.path.exists(model_path):
+            st.success("Un modèle ML est disponible.")
+            # Sélectionner une brebis
+            params = [st.session_state.user_id]
+            query_brebis = """
+                SELECT b.id, b.numero_id, b.nom, e.nom
+                FROM brebis b
+                JOIN elevages e ON b.elevage_id = e.id
+                JOIN eleveurs el ON e.eleveur_id = el.id
+                WHERE el.user_id=?
+            """
+            query_brebis, params = filtrer_par_eleveur(query_brebis, params, join_eleveur=True)
+            brebis_list = db.fetchall(query_brebis, params)
+            brebis_dict = {f"{b[0]} - {b[1]} {b[2]} ({b[3]})": b[0] for b in brebis_list}
+            
+            if brebis_dict:
+                selected = st.selectbox("Choisir une brebis", list(brebis_dict.keys()), key="ia_brebis")
+                bid = brebis_dict[selected]
+                if st.button("Prédire avec ML"):
+                    pred = predict_lait_ml(bid)
+                    if pred is not None:
+                        st.metric("Production prédite (L/j)", f"{pred:.2f}")
+                    else:
+                        st.warning("Impossible de faire la prédiction (données manquantes).")
+            else:
+                st.warning("Aucune brebis disponible.")
+        else:
+            st.info("Aucun modèle ML entraîné. Vous pouvez en entraîner un si vous avez suffisamment de données de production.")
+            if st.button("Entraîner un modèle ML"):
+                with st.spinner("Entraînement en cours..."):
+                    result = train_lait_model()
+                    if result is None:
+                        st.error("Pas assez de données (minimum 20 brebis avec productions).")
+                    else:
+                        model, score = result
+                        st.success(f"Modèle entraîné avec un score R² de {score:.2f} sur le test.")
+
+    # --- Onglet 2 : Détection d'anomalies ---
+    with tab2:
+        st.subheader("Détection d'anomalies (Isolation Forest)")
+        # Récupérer les données nécessaires
+        params = [st.session_state.user_id]
+        query_brebis = """
+            SELECT b.id, b.numero_id, b.nom, b.poids_vif,
+                   AVG(p.quantite) as prod_moy,
+                   AVG(m.score_global) as score_morpho
+            FROM brebis b
+            LEFT JOIN productions p ON b.id = p.brebis_id AND p.date >= date('now', '-30 days')
+            LEFT JOIN mesures_morpho m ON b.id = m.brebis_id
+            JOIN elevages e ON b.elevage_id = e.id
+            JOIN eleveurs el ON e.eleveur_id = el.id
+            WHERE el.user_id=?
+            GROUP BY b.id
+        """
+        query_brebis, params = filtrer_par_eleveur(query_brebis, params, join_eleveur=True)
+        df = pd.read_sql_query(query_brebis, db.conn, params=params)
+        if df.empty:
+            st.warning("Aucune donnée disponible.")
+        else:
+            # Remplir les NaN
+            df['viande_estimee'] = df['poids_vif'] * 0.45
+            df['prod_moy'] = df['prod_moy'].fillna(0)
+            df['score_morpho'] = df['score_morpho'].fillna(0)
+            
+            # Détection
+            features = ['prod_moy', 'score_morpho', 'poids_vif', 'viande_estimee']
+            X = df[features].fillna(0)
+            model = IsolationForest(contamination=0.1, random_state=42)
+            preds = model.fit_predict(X)
+            df['anomalie'] = preds
+            anomalies = df[df['anomalie'] == -1]
+            st.write(f"**{len(anomalies)}** brebis potentiellement anormales détectées.")
+            if not anomalies.empty:
+                st.dataframe(anomalies[['numero_id', 'nom', 'prod_moy', 'score_morpho', 'poids_vif']])
+            else:
+                st.success("Aucune anomalie détectée.")
+
+    # --- Onglet 3 : Clustering des brebis ---
+    with tab3:
+        st.subheader("Clustering des brebis (K-Means)")
+        # Récupérer les données
+        params = [st.session_state.user_id]
+        query_brebis = """
+            SELECT b.id, b.numero_id, b.nom, b.poids_vif,
+                   AVG(p.quantite) as prod_moy,
+                   AVG(m.score_global) as score_morpho
+            FROM brebis b
+            LEFT JOIN productions p ON b.id = p.brebis_id AND p.date >= date('now', '-30 days')
+            LEFT JOIN mesures_morpho m ON b.id = m.brebis_id
+            JOIN elevages e ON b.elevage_id = e.id
+            JOIN eleveurs el ON e.eleveur_id = el.id
+            WHERE el.user_id=?
+            GROUP BY b.id
+        """
+        query_brebis, params = filtrer_par_eleveur(query_brebis, params, join_eleveur=True)
+        df = pd.read_sql_query(query_brebis, db.conn, params=params)
+        if df.empty:
+            st.warning("Aucune donnée disponible.")
+        else:
+            df['viande_estimee'] = df['poids_vif'] * 0.45
+            df['prod_moy'] = df['prod_moy'].fillna(0)
+            df['score_morpho'] = df['score_morpho'].fillna(0)
+            
+            n_clusters = st.slider("Nombre de clusters", 2, 5, 3)
+            features = ['prod_moy', 'score_morpho', 'poids_vif', 'viande_estimee']
+            X = df[features].fillna(0)
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            clusters = kmeans.fit_predict(X_scaled)
+            df['cluster'] = clusters
+            
+            # Afficher les clusters
+            fig = px.scatter_3d(df, x='prod_moy', y='score_morpho', z='poids_vif', color='cluster',
+                                 hover_data=['numero_id', 'nom'], title="Clusters des brebis")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Statistiques par cluster
+            st.dataframe(df.groupby('cluster')[features].mean().round(2))
+
+    # --- Onglet 4 : Analyse exploratoire (import) ---
+    with tab4:
+        st.subheader("Analyse exploratoire automatique d'un fichier externe")
+        uploaded_file = st.file_uploader("Choisir un fichier CSV ou Excel", type=['csv', 'xlsx'])
+        if uploaded_file is not None:
+            try:
+                if uploaded_file.name.endswith('.csv'):
+                    df = pd.read_csv(uploaded_file)
+                else:
+                    df = pd.read_excel(uploaded_file)
+                st.success("Fichier chargé avec succès.")
+                st.dataframe(df.head())
+                if profiling_available:
+                    if st.button("Générer le rapport d'analyse"):
+                        with st.spinner("Génération du rapport..."):
+                            profile = ProfileReport(df, title="Rapport d'analyse", explorative=True)
+                            st_profile_report(profile)
+                else:
+                    st.warning("pandas-profiling n'est pas installé. Veuillez l'installer pour utiliser cette fonctionnalité.")
+            except Exception as e:
+                st.error(f"Erreur de lecture : {e}")
+
 # -----------------------------------------------------------------------------
 # SIDEBAR ET MAIN
 # -----------------------------------------------------------------------------
@@ -2424,6 +2754,7 @@ def sidebar():
                  "🤰 Reproduction",
                  "📤 Export données",
                  "🏆 Élite et comparaison",
+                 "🧠 IA & Data Mining",
                  "🚪 Déconnexion"],
                 label_visibility="collapsed"
             )
@@ -2452,6 +2783,7 @@ def sidebar():
                 "🤰 Reproduction": "reproduction",
                 "📤 Export données": "export",
                 "🏆 Élite et comparaison": "elite",
+                "🧠 IA & Data Mining": "ia",
                 "🚪 Déconnexion": "logout"
             }
             
@@ -2496,6 +2828,8 @@ def main():
         page_export()
     elif st.session_state.current_page == "elite":
         page_elite()
+    elif st.session_state.current_page == "ia":
+        page_ia()
 
 # -----------------------------------------------------------------------------
 # POINT D'ENTRÉE

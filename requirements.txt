@@ -14,4 +14,8 @@ pandas-profiling
 streamlit-pandas-profiling
 ydata-profiling
 joblib
-sklearn
+scikit-learn
+
+
+
+

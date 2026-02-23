@@ -2681,9 +2681,9 @@ def page_ia():
             # Statistiques par cluster
             st.dataframe(df.groupby('cluster')[features].mean().round(2))
 
-    # --- Onglet 4 : Analyse exploratoire (import) ---
+       # --- Onglet 4 : Analyse exploratoire (import) ---
     with tab4:
-        st.subheader("Analyse exploratoire automatique d'un fichier externe")
+        st.subheader("Analyse exploratoire d'un fichier externe")
         uploaded_file = st.file_uploader("Choisir un fichier CSV ou Excel", type=['csv', 'xlsx'])
         if uploaded_file is not None:
             try:
@@ -2693,13 +2693,28 @@ def page_ia():
                     df = pd.read_excel(uploaded_file)
                 st.success("Fichier chargé avec succès.")
                 st.dataframe(df.head())
+                
                 if profiling_available:
-                    if st.button("Générer le rapport d'analyse"):
-                        with st.spinner("Génération du rapport..."):
-                            profile = ProfileReport(df, title="Rapport d'analyse", explorative=True)
-                            st_profile_report(profile)
+                    analyse_mode = st.radio("Type d'analyse", ["Statistiques descriptives", "Rapport complet (ydata-profiling)"])
                 else:
-                    st.warning("pandas-profiling n'est pas installé. Veuillez l'installer pour utiliser cette fonctionnalité.")
+                    st.info("Module ydata-profiling non installé. Utilisation des statistiques descriptives.")
+                    analyse_mode = "Statistiques descriptives"
+                
+                if analyse_mode == "Statistiques descriptives":
+                    st.subheader("Statistiques descriptives")
+                    st.dataframe(df.describe(include='all').transpose())
+                    st.subheader("Informations sur les colonnes")
+                    buffer = io.StringIO()
+                    df.info(buf=buffer)
+                    st.text(buffer.getvalue())
+                else:
+                    if profiling_available:
+                        if st.button("Générer le rapport d'analyse"):
+                            with st.spinner("Génération du rapport..."):
+                                profile = ProfileReport(df, title="Rapport d'analyse", explorative=True)
+                                st_profile_report(profile)
+                    else:
+                        st.warning("Le module ydata-profiling n'est pas disponible. Cette option ne devrait pas apparaître.")
             except Exception as e:
                 st.error(f"Erreur de lecture : {e}")
 

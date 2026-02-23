@@ -32,12 +32,12 @@ from sklearn.linear_model import ElasticNet
 
 # Pour l'analyse exploratoire (optionnel)
 try:
-    from pandas_profiling import ProfileReport
+    from ydata_profiling import ProfileReport
     from streamlit_pandas_profiling import st_profile_report
     profiling_available = True
 except ImportError:
     profiling_available = False
-    st.warning("pandas-profiling non installé. L'analyse exploratoire automatique ne sera pas disponible.")
+    st.warning("ydata-profiling non installé. L'analyse exploratoire automatique ne sera pas disponible.")
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION

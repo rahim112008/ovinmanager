@@ -1411,38 +1411,57 @@ def page_gestion_elevage():
         else:
             st.info("Aucun éleveur enregistré.")
     
-    # --- Onglet Élevages ---
+       # --- Onglet Élevages ---
     with tab2:
         st.subheader("Liste des élevages")
         
-        # Récupérer les élevages de l'éleveur sélectionné
-        params = [st.session_state.user_id]
-        query = """
-            SELECT e.id, e.nom, e.localisation, e.superficie, el.nom
-            FROM elevages e
-            JOIN eleveurs el ON e.eleveur_id = el.id
-            WHERE el.user_id=?
-        """
-        query, params = filtrer_par_eleveur(query, params, join_eleveur=True)
-        elevages = db.fetchall(query, params)
+        # Récupérer tous les éleveurs de l'utilisateur
+        eleveurs_list = db.fetchall(
+            "SELECT id, nom FROM eleveurs WHERE user_id=?", (st.session_state.user_id,)
+        )
+        # DEBUG : afficher le nombre d'éleveurs
+        st.info(f"Nombre d'éleveurs trouvés : {len(eleveurs_list)}")
         
-        if not elevages:
-            st.info("Aucun élevage pour cet éleveur.")
+        eleveurs_dict = {f"{e[0]} - {e[1]}": e[0] for e in eleveurs_list}
+        
+        if not eleveurs_dict:
+            st.warning("Vous devez d'abord ajouter un éleveur.")
         else:
-            df = pd.DataFrame(elevages, columns=["ID", "Nom", "Localisation", "Superficie", "Éleveur"])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            
-            with st.expander("🗑️ Supprimer un élevage"):
-                del_id = st.selectbox("Choisir l'élevage", [f"{e[0]} - {e[1]}" for e in elevages], key="del_elevage_select")
-                if st.button("Supprimer", key="del_elevage_btn"):
-                    eid = int(del_id.split(" - ")[0])
-                    count = db.fetchone("SELECT COUNT(*) FROM brebis WHERE elevage_id=?", (eid,))[0]
-                    if count > 0:
-                        st.error("Cet élevage contient encore des brebis. Supprimez d'abord les brebis.")
-                    else:
-                        db.execute("DELETE FROM elevages WHERE id=?", (eid,))
-                        st.success("Élevage supprimé")
+            # Expandeur ouvert par défaut
+            with st.expander("➕ Ajouter un élevage", expanded=True):
+                with st.form("form_elevage"):
+                    eleveur_choice = st.selectbox("Éleveur", list(eleveurs_dict.keys()))
+                    nom_elevage = st.text_input("Nom de l'élevage")
+                    localisation = st.text_input("Localisation")
+                    superficie = st.number_input("Superficie (ha)", min_value=0.0, step=0.1)
+                    submitted = st.form_submit_button("Ajouter")
+                    if submitted:
+                        eleveur_id = eleveurs_dict[eleveur_choice]
+                        db.execute(
+                            "INSERT INTO elevages (eleveur_id, nom, localisation, superficie) VALUES (?, ?, ?, ?)",
+                            (eleveur_id, nom_elevage, localisation, superficie)
+                        )
+                        st.success("Élevage ajouté")
                         st.rerun()
+            
+            # Ensuite, afficher la liste des élevages (filtrée par l'éleveur actif)
+            params = [st.session_state.user_id]
+            query = """
+                SELECT e.id, e.nom, e.localisation, e.superficie, el.nom
+                FROM elevages e
+                JOIN eleveurs el ON e.eleveur_id = el.id
+                WHERE el.user_id=?
+            """
+            query, params = filtrer_par_eleveur(query, params, join_eleveur=True)
+            elevages = db.fetchall(query, params)
+            
+            if not elevages:
+                st.info("Aucun élevage pour cet éleveur.")
+            else:
+                df = pd.DataFrame(elevages, columns=["ID", "Nom", "Localisation", "Superficie", "Éleveur"])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                
+                # (Optionnel) suppression d'élevage...
     
     # --- Onglet Brebis ---
     with tab3:

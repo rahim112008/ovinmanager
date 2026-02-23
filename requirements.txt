@@ -13,3 +13,4 @@ tensorflow
 pandas-profiling
 streamlit-pandas-profiling
 ydata-profiling
+joblib

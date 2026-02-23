@@ -1897,63 +1897,81 @@ def page_export():
     st.title("📤 Export des données")
     st.markdown("Téléchargez l'ensemble de vos données au format CSV ou Excel pour les partager avec votre professeur.")
     
-    format_export = st.radio("Format", ["CSV", "Excel"])
-    inclure_photos = st.checkbox("Inclure les photos dans l'archive", value=True)
+    format_export = st.radio("Format", ["CSV (dossier compressé)", "Excel (fichier unique)"])
+    inclure_photos = st.checkbox("Inclure les photos dans l'archive (pour CSV uniquement)", value=True)
     
     if st.button("Générer l'export"):
-        tables = ["eleveurs", "elevages", "brebis", "productions", "mesures_morpho", "mesures_mamelles", "composition_corporelle",
-                  "vaccinations", "soins", "chaleurs", "saillies", "mises_bas", "aliments", "rations", "ration_composition"]
+        # Liste des tables à exporter
+        all_tables = ["eleveurs", "elevages", "brebis", "productions", "mesures_morpho", 
+                      "mesures_mamelles", "composition_corporelle", "vaccinations", "soins", 
+                      "chaleurs", "saillies", "mises_bas", "aliments", "rations", "ration_composition"]
+        
+        # Obtenir la liste des tables réellement présentes dans la base
+        cursor = db.conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        existing_tables = [row[0] for row in cursor.fetchall()]
+        
         data_frames = {}
-        
-        for table in tables:
-            if table == "eleveurs":
-                df = pd.read_sql_query(f"SELECT * FROM {table} WHERE user_id=?", db.conn, params=(st.session_state.user_id,))
-            elif table == "elevages":
-                df = pd.read_sql_query("""
-                    SELECT e.* FROM elevages e
-                    JOIN eleveurs el ON e.eleveur_id = el.id
-                    WHERE el.user_id=?
-                """, db.conn, params=(st.session_state.user_id,))
-            elif table in ["brebis", "productions", "vaccinations", "soins", "chaleurs", "saillies", "mises_bas"]:
-                df = pd.read_sql_query(f"""
-                    SELECT t.* FROM {table} t
-                    JOIN brebis b ON t.brebis_id = b.id
-                    JOIN elevages e ON b.elevage_id = e.id
-                    JOIN eleveurs el ON e.eleveur_id = el.id
-                    WHERE el.user_id=?
-                """, db.conn, params=(st.session_state.user_id,))
-            elif table in ["mesures_morpho", "mesures_mamelles", "composition_corporelle"]:
-                df = pd.read_sql_query(f"""
-                    SELECT t.* FROM {table} t
-                    JOIN brebis b ON t.brebis_id = b.id
-                    JOIN elevages e ON b.elevage_id = e.id
-                    JOIN eleveurs el ON e.eleveur_id = el.id
-                    WHERE el.user_id=?
-                """, db.conn, params=(st.session_state.user_id,))
-            else:
-                # tables non liées à un user (aliments, rations, etc.) : on prend tout
-                df = pd.read_sql_query(f"SELECT * FROM {table}", db.conn)
+        for table in all_tables:
+            if table not in existing_tables:
+                st.warning(f"La table {table} n'existe pas encore dans la base. Elle sera ignorée.")
+                data_frames[table] = pd.DataFrame()  # vide
+                continue
             
-            data_frames[table] = df
+            try:
+                if table == "eleveurs":
+                    df = pd.read_sql_query(f"SELECT * FROM {table} WHERE user_id=?", db.conn, params=(st.session_state.user_id,))
+                elif table == "elevages":
+                    df = pd.read_sql_query("""
+                        SELECT e.* FROM elevages e
+                        JOIN eleveurs el ON e.eleveur_id = el.id
+                        WHERE el.user_id=?
+                    """, db.conn, params=(st.session_state.user_id,))
+                elif table in ["brebis", "productions", "vaccinations", "soins", "chaleurs", "saillies", "mises_bas"]:
+                    df = pd.read_sql_query(f"""
+                        SELECT t.* FROM {table} t
+                        JOIN brebis b ON t.brebis_id = b.id
+                        JOIN elevages e ON b.elevage_id = e.id
+                        JOIN eleveurs el ON e.eleveur_id = el.id
+                        WHERE el.user_id=?
+                    """, db.conn, params=(st.session_state.user_id,))
+                elif table in ["mesures_morpho", "mesures_mamelles", "composition_corporelle"]:
+                    df = pd.read_sql_query(f"""
+                        SELECT t.* FROM {table} t
+                        JOIN brebis b ON t.brebis_id = b.id
+                        JOIN elevages e ON b.elevage_id = e.id
+                        JOIN eleveurs el ON e.eleveur_id = el.id
+                        WHERE el.user_id=?
+                    """, db.conn, params=(st.session_state.user_id,))
+                else:
+                    # tables globales (aliments, rations, etc.)
+                    df = pd.read_sql_query(f"SELECT * FROM {table}", db.conn)
+                
+                data_frames[table] = df
+            except Exception as e:
+                st.error(f"Erreur lors de l'export de la table {table}: {e}")
+                data_frames[table] = pd.DataFrame()
         
-        if format_export == "Excel":
+        # Générer le fichier selon le format
+        if format_export.startswith("Excel"):
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 for name, df in data_frames.items():
-                    df.to_excel(writer, sheet_name=name, index=False)
+                    if not df.empty:
+                        df.to_excel(writer, sheet_name=name[:31], index=False)  # max 31 caractères pour les noms d'onglets Excel
             output.seek(0)
             st.download_button(
-                label="Télécharger Excel",
+                label="📥 Télécharger Excel",
                 data=output,
                 file_name=f"ovin_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-        else:
+        else:  # CSV
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED) as zip_file:
                 for name, df in data_frames.items():
-                    csv_data = df.to_csv(index=False).encode('utf-8')
-                    zip_file.writestr(f"{name}.csv", csv_data)
+                    if not df.empty:
+                        csv_data = df.to_csv(index=False).encode('utf-8')
+                        zip_file.writestr(f"{name}.csv", csv_data)
                 # Ajouter les photos si demandé
                 if inclure_photos and os.path.exists(PHOTO_DIR):
                     for root, dirs, files in os.walk(PHOTO_DIR):
@@ -1962,7 +1980,7 @@ def page_export():
                             zip_file.write(file_path, arcname=os.path.join("photos", file))
             zip_buffer.seek(0)
             st.download_button(
-                label="Télécharger ZIP (CSV)",
+                label="📥 Télécharger ZIP (CSV + photos)",
                 data=zip_buffer,
                 file_name=f"ovin_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
                 mime="application/zip"

@@ -1849,20 +1849,67 @@ def page_reproduction():
 # -----------------------------------------------------------------------------
 def page_nutrition_avancee():
     st.title("🌾 Nutrition avancée et formulation")
-    
+
+    # -------------------------------------------------------------------------
+    # Initialisation : si la table aliments est vide, on la remplit avec des données par défaut (marché algérien)
+    # -------------------------------------------------------------------------
+    cursor = db.conn.execute("SELECT COUNT(*) FROM aliments")
+    count = cursor.fetchone()[0]
+    if count == 0:
+        aliments_defaut = [
+            ("Orge", "Concentré", 1.15, 85, 86, 40),      # UEM, PDIN, MS%, prix DA/kg
+            ("Maïs", "Concentré", 1.30, 95, 87, 45),
+            ("Son de blé", "Concentré", 0.90, 120, 87, 25),
+            ("Tourteau de soja", "Concentré", 1.20, 450, 88, 80),
+            ("Foin de luzerne", "Fourrage", 0.70, 120, 85, 30),
+            ("Paille de blé", "Fourrage", 0.45, 25, 88, 10),
+            ("Betterave (pulpe)", "Fourrage", 0.95, 80, 90, 35),
+            ("Mélasse", "Autre", 0.85, 50, 75, 20),
+            ("CMV (complément)", "Minéral", 0.0, 0, 100, 150)
+        ]
+        for alim in aliments_defaut:
+            db.execute(
+                "INSERT INTO aliments (nom, type, uem, pdin, ms, prix_kg) VALUES (?, ?, ?, ?, ?, ?)",
+                alim
+            )
+        st.info("📦 Catalogue d'aliments initialisé avec les produits du marché algérien.")
+
     tab1, tab2, tab3 = st.tabs(["📦 Catalogue aliments", "📋 Rations types", "🧮 Calcul ration personnalisée"])
-    
+
     with tab1:
         st.subheader("Gestion des aliments")
-        
-        with st.expander("➕ Ajouter un aliment"):
+        st.markdown("""
+        **Aliments disponibles** (valeurs nutritionnelles indicatives).  
+        Vous pouvez modifier les prix en temps réel pour refléter le marché.
+        """)
+
+        # Afficher le tableau avec possibilité d'éditer les prix
+        aliments = db.fetchall("SELECT id, nom, type, uem, pdin, ms, prix_kg FROM aliments ORDER BY type, nom")
+        if aliments:
+            df_alim = pd.DataFrame(aliments, columns=["ID", "Nom", "Type", "UEM", "PDIN", "MS%", "Prix (DA/kg)"])
+            st.dataframe(df_alim, use_container_width=True, hide_index=True)
+
+            # Modification de prix
+            with st.expander("💰 Modifier les prix"):
+                choix = st.selectbox("Choisir un aliment", [f"{a[0]} - {a[1]}" for a in aliments], key="edit_prix")
+                aid = int(choix.split(" - ")[0])
+                nouveau_prix = st.number_input("Nouveau prix (DA/kg)", min_value=0.0, step=1.0, format="%.2f")
+                if st.button("Mettre à jour"):
+                    db.execute("UPDATE aliments SET prix_kg=? WHERE id=?", (nouveau_prix, aid))
+                    st.success("Prix mis à jour")
+                    st.rerun()
+        else:
+            st.info("Aucun aliment enregistré.")
+
+        # Ajout d'un nouvel aliment
+        with st.expander("➕ Ajouter un aliment personnalisé"):
             with st.form("form_aliment"):
                 nom = st.text_input("Nom de l'aliment")
                 type_alim = st.selectbox("Type", ["Fourrage", "Concentré", "Minéral", "Autre"])
-                uem = st.number_input("UEM (MJ/kg)", min_value=0.0, step=0.1, format="%.2f")
-                pdin = st.number_input("PDIN (g/kg)", min_value=0.0, step=1.0)
+                uem = st.number_input("UEM (MJ/kg MS)", min_value=0.0, step=0.1, format="%.2f")
+                pdin = st.number_input("PDIN (g/kg MS)", min_value=0.0, step=1.0)
                 ms = st.number_input("Matière sèche (%)", min_value=0.0, max_value=100.0, value=85.0, step=1.0)
-                prix = st.number_input("Prix (DA/kg)", min_value=0.0, step=1.0, format="%.2f")
+                prix = st.number_input("Prix (DA/kg brut)", min_value=0.0, step=1.0, format="%.2f")
                 if st.form_submit_button("Ajouter"):
                     try:
                         db.execute(
@@ -1873,28 +1920,14 @@ def page_nutrition_avancee():
                         st.rerun()
                     except sqlite3.IntegrityError:
                         st.error("Cet aliment existe déjà.")
-        
-        aliments = db.fetchall("SELECT id, nom, type, uem, pdin, ms, prix_kg FROM aliments")
-        if aliments:
-            df_alim = pd.DataFrame(aliments, columns=["ID", "Nom", "Type", "UEM", "PDIN", "MS%", "Prix DA/kg"])
-            st.dataframe(df_alim, use_container_width=True, hide_index=True)
-            
-            with st.expander("💰 Modifier un prix"):
-                choix = st.selectbox("Choisir un aliment", [f"{a[0]} - {a[1]}" for a in aliments])
-                aid = int(choix.split(" - ")[0])
-                nouveau_prix = st.number_input("Nouveau prix (DA/kg)", min_value=0.0, step=1.0)
-                if st.button("Mettre à jour"):
-                    db.execute("UPDATE aliments SET prix_kg=? WHERE id=?", (nouveau_prix, aid))
-                    st.success("Prix mis à jour")
-                    st.rerun()
-        else:
-            st.info("Aucun aliment enregistré. Commencez par en ajouter.")
-    
+
     with tab2:
         st.subheader("Rations types par état physiologique")
-        
+        st.markdown("Sélectionnez un état pour voir la ration recommandée (basée sur des moyennes algériennes).")
+
         etat_physio = st.selectbox("État physiologique", Config.ETATS_PHYSIO)
-        
+
+        # Vérifier si une ration existe déjà pour cet état
         ration_existante = db.fetchone("SELECT id, nom, description FROM rations WHERE etat_physio=?", (etat_physio,))
         if ration_existante:
             st.success(f"Ration existante : {ration_existante[1]}")
@@ -1905,8 +1938,8 @@ def page_nutrition_avancee():
                 WHERE rc.ration_id=?
             """, (ration_existante[0],))
             if compo:
-                df_compo = pd.DataFrame(compo, columns=["Aliment", "Quantité (kg/jour)", "Prix/kg"])
-                df_compo["Coût (DA/jour)"] = df_compo["Quantité (kg/jour)"] * df_compo["Prix/kg"]
+                df_compo = pd.DataFrame(compo, columns=["Aliment", "Quantité (kg brut/jour)", "Prix/kg"])
+                df_compo["Coût (DA/jour)"] = df_compo["Quantité (kg brut/jour)"] * df_compo["Prix/kg"]
                 st.dataframe(df_compo, use_container_width=True, hide_index=True)
                 total_journalier = df_compo["Coût (DA/jour)"].sum()
                 st.metric("Coût total journalier", f"{total_journalier:.2f} DA")
@@ -1914,9 +1947,10 @@ def page_nutrition_avancee():
                 st.info("Cette ration n'a pas d'aliments associés.")
         else:
             st.info("Aucune ration définie pour cet état.")
-        
+
+        # Configuration/modification d'une ration
         with st.expander("⚙️ Configurer une ration pour cet état"):
-            aliments = db.fetchall("SELECT id, nom FROM aliments")
+            aliments = db.fetchall("SELECT id, nom FROM aliments ORDER BY nom")
             if not aliments:
                 st.warning("Ajoutez d'abord des aliments.")
             else:
@@ -1934,12 +1968,25 @@ def page_nutrition_avancee():
                         st.success("Ration créée, vous pouvez maintenant ajouter des aliments.")
                         st.rerun()
                     ration_id = None
-                
+
                 if ration_id:
+                    # Afficher la composition actuelle
+                    compo_actuelle = db.fetchall("""
+                        SELECT rc.id, a.nom, rc.quantite_kg
+                        FROM ration_composition rc
+                        JOIN aliments a ON rc.aliment_id = a.id
+                        WHERE rc.ration_id=?
+                    """, (ration_id,))
+                    if compo_actuelle:
+                        st.markdown("**Composition actuelle :**")
+                        for c in compo_actuelle:
+                            st.write(f"- {c[1]} : {c[2]} kg/jour")
+
+                    # Ajout d'un aliment
                     st.subheader("Ajouter un aliment à cette ration")
-                    aliment_choix = st.selectbox("Choisir un aliment", [f"{a[0]} - {a[1]}" for a in aliments])
+                    aliment_choix = st.selectbox("Choisir un aliment", [f"{a[0]} - {a[1]}" for a in aliments], key="add_alim")
                     aid = int(aliment_choix.split(" - ")[0])
-                    quantite = st.number_input("Quantité (kg/jour)", min_value=0.0, step=0.1, format="%.2f")
+                    quantite = st.number_input("Quantité (kg brut/jour)", min_value=0.0, step=0.1, format="%.2f")
                     if st.button("Ajouter à la ration"):
                         existing = db.fetchone(
                             "SELECT id FROM ration_composition WHERE ration_id=? AND aliment_id=?",
@@ -1957,7 +2004,8 @@ def page_nutrition_avancee():
                             )
                         st.success("Aliment ajouté/modifié")
                         st.rerun()
-                    
+
+                    # Suppression d'un aliment
                     with st.expander("🗑️ Supprimer un aliment de la ration"):
                         compo = db.fetchall("""
                             SELECT rc.id, a.nom FROM ration_composition rc
@@ -1965,16 +2013,18 @@ def page_nutrition_avancee():
                             WHERE rc.ration_id=?
                         """, (ration_id,))
                         if compo:
-                            choix_suppr = st.selectbox("Aliment à retirer", [f"{c[0]} - {c[1]}" for c in compo])
+                            choix_suppr = st.selectbox("Aliment à retirer", [f"{c[0]} - {c[1]}" for c in compo], key="del_alim")
                             suppr_id = int(choix_suppr.split(" - ")[0])
                             if st.button("Retirer"):
                                 db.execute("DELETE FROM ration_composition WHERE id=?", (suppr_id,))
                                 st.success("Aliment retiré")
                                 st.rerun()
-    
+
     with tab3:
         st.subheader("Calcul de ration personnalisée")
-        
+        st.markdown("Calculez la ration optimale pour une brebis spécifique ou une situation type, avec estimation du coût journalier en dinars algériens.")
+
+        # Sélection d'une brebis (optionnel)
         params = [st.session_state.user_id]
         query_brebis = """
             SELECT b.id, b.numero_id, b.nom, b.etat_physio, b.poids_vif
@@ -1986,7 +2036,7 @@ def page_nutrition_avancee():
         query_brebis, params = filtrer_par_eleveur(query_brebis, params, join_eleveur=True)
         brebis_list = db.fetchall(query_brebis, params)
         brebis_dict = {f"{b[0]} - {b[1]} {b[2]}": b[0] for b in brebis_list}
-        
+
         if brebis_dict:
             choix = st.selectbox("Choisir une brebis (ou personnaliser)", ["Personnalisé"] + list(brebis_dict.keys()))
             if choix != "Personnalisé":
@@ -2001,66 +2051,104 @@ def page_nutrition_avancee():
             else:
                 poids_def = 50.0
                 etat_def = "Tarie"
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                poids = st.number_input("Poids vif (kg)", min_value=10.0, max_value=150.0, value=poids_def)
-            with col2:
-                etat = st.selectbox("État physiologique", Config.ETATS_PHYSIO, index=Config.ETATS_PHYSIO.index(etat_def) if etat_def in Config.ETATS_PHYSIO else 0)
-            
-            lactation = st.number_input("Production laitière (L/j)", min_value=0.0, value=0.0, step=0.5)
-            
-            besoins = OvinScience.besoins_nutritionnels(poids, etat, lactation)
-            st.info(f"**Besoins journaliers** : UEM = {besoins['uem']} MJ, PDIN = {besoins['pdin']} g, MS = {besoins['ms']} kg")
-            
-            aliments = db.fetchall("SELECT id, nom, type, uem, pdin, ms, prix_kg FROM aliments")
-            if not aliments:
-                st.warning("Ajoutez d'abord des aliments.")
-            else:
-                st.subheader("Composition de la ration")
-                ration_temp = {}
-                for alim in aliments:
-                    with st.expander(f"{alim[1]} ({alim[2]}) - {alim[6]} DA/kg"):
-                        qte = st.number_input(f"Quantité (kg MS)", min_value=0.0, step=0.1, key=f"qte_{alim[0]}")
+        else:
+            poids_def = 50.0
+            etat_def = "Tarie"
+
+        col1, col2 = st.columns(2)
+        with col1:
+            poids = st.number_input("Poids vif (kg)", min_value=10.0, max_value=150.0, value=poids_def)
+        with col2:
+            etat = st.selectbox("État physiologique", Config.ETATS_PHYSIO, index=Config.ETATS_PHYSIO.index(etat_def) if etat_def in Config.ETATS_PHYSIO else 0)
+
+        lactation = st.number_input("Production laitière (L/j)", min_value=0.0, value=0.0, step=0.5)
+
+        # Calcul des besoins
+        besoins = OvinScience.besoins_nutritionnels(poids, etat, lactation)
+        st.info(f"**Besoins journaliers** : UEM = {besoins['uem']} MJ, PDIN = {besoins['pdin']} g, MS = {besoins['ms']} kg")
+
+        # Récupérer tous les aliments disponibles
+        aliments = db.fetchall("SELECT id, nom, type, uem, pdin, ms, prix_kg FROM aliments ORDER BY nom")
+        if not aliments:
+            st.warning("Ajoutez d'abord des aliments.")
+        else:
+            st.subheader("Composition de la ration (en kg brut)")
+
+            # Dictionnaire pour stocker les quantités saisies
+            qtes = {}
+            cols = st.columns(2)
+            for idx, alim in enumerate(aliments):
+                with cols[idx % 2]:
+                    with st.container():
+                        st.markdown(f"**{alim[1]}** ({alim[2]})")
+                        st.caption(f"UEM:{alim[3]} | PDIN:{alim[4]} | MS:{alim[5]}% | {alim[6]} DA/kg")
+                        qte = st.number_input(
+                            "kg brut/jour",
+                            min_value=0.0,
+                            step=0.1,
+                            format="%.2f",
+                            key=f"qte_{alim[0]}"
+                        )
                         if qte > 0:
-                            ration_temp[alim[0]] = {
+                            qtes[alim[0]] = {
                                 "nom": alim[1],
-                                "qte": qte,
+                                "qte_brut": qte,
+                                "ms_pct": alim[5] / 100,
                                 "uem": alim[3],
                                 "pdin": alim[4],
-                                "ms": alim[5],
-                                "prix": alim[6]
+                                "prix_kg": alim[6]
                             }
-                
-                if ration_temp and st.button("Calculer la ration"):
-                    total_uem = sum(v["qte"] * v["uem"] for v in ration_temp.values())
-                    total_pdin = sum(v["qte"] * v["pdin"] for v in ration_temp.values())
-                    total_ms = sum(v["qte"] for v in ration_temp.values())
-                    total_prix = sum(v["qte"] * v["prix"] for v in ration_temp.values())
-                    
-                    st.subheader("Résultats")
-                    cola, colb, colc = st.columns(3)
-                    cola.metric("UEM apportée", f"{total_uem:.2f} MJ", delta=f"{total_uem - besoins['uem']:.2f}")
-                    colb.metric("PDIN apportée", f"{total_pdin:.2f} g", delta=f"{total_pdin - besoins['pdin']:.2f}")
-                    colc.metric("MS apportée", f"{total_ms:.2f} kg", delta=f"{total_ms - besoins['ms']:.2f}")
-                    
-                    st.metric("Coût journalier", f"{total_prix:.2f} DA")
-                    
-                    if total_uem < besoins['uem'] * 0.9:
-                        st.warning("⚠️ Apport énergétique insuffisant")
-                    elif total_uem > besoins['uem'] * 1.1:
-                        st.warning("⚠️ Excès d'énergie")
-                    else:
-                        st.success("✅ Énergie équilibrée")
-                    
-                    if total_pdin < besoins['pdin'] * 0.9:
-                        st.warning("⚠️ Apport protéique insuffisant")
-                    elif total_pdin > besoins['pdin'] * 1.1:
-                        st.warning("⚠️ Excès de protéines")
-                    else:
-                        st.success("✅ Protéines équilibrées")
-        else:
-            st.info("Aucune brebis disponible. Vous pouvez utiliser 'Personnalisé'.")
+
+            if qtes and st.button("Calculer la ration"):
+                # Calcul des apports
+                total_uem = 0
+                total_pdin = 0
+                total_ms = 0
+                total_prix = 0
+                lignes = []
+                for aid, vals in qtes.items():
+                    qte_ms = vals["qte_brut"] * vals["ms_pct"]
+                    apport_uem = qte_ms * vals["uem"]
+                    apport_pdin = qte_ms * vals["pdin"]
+                    cout = vals["qte_brut"] * vals["prix_kg"]
+                    total_uem += apport_uem
+                    total_pdin += apport_pdin
+                    total_ms += qte_ms
+                    total_prix += cout
+                    lignes.append({
+                        "Aliment": vals["nom"],
+                        "kg brut": round(vals["qte_brut"], 2),
+                        "kg MS": round(qte_ms, 2),
+                        "UEM": round(apport_uem, 2),
+                        "PDIN (g)": round(apport_pdin, 2),
+                        "Coût (DA)": round(cout, 2)
+                    })
+
+                st.subheader("Résultats détaillés")
+                st.dataframe(pd.DataFrame(lignes), use_container_width=True, hide_index=True)
+
+                st.subheader("Synthèse")
+                cola, colb, colc = st.columns(3)
+                cola.metric("UEM apportée", f"{total_uem:.2f} MJ", delta=f"{total_uem - besoins['uem']:.2f}")
+                colb.metric("PDIN apportée", f"{total_pdin:.2f} g", delta=f"{total_pdin - besoins['pdin']:.2f}")
+                colc.metric("MS apportée", f"{total_ms:.2f} kg", delta=f"{total_ms - besoins['ms']:.2f}")
+
+                st.metric("💰 Coût journalier total", f"{total_prix:.2f} DA")
+
+                # Vérification équilibre
+                if total_uem < besoins['uem'] * 0.9:
+                    st.warning("⚠️ Apport énergétique insuffisant")
+                elif total_uem > besoins['uem'] * 1.1:
+                    st.warning("⚠️ Excès d'énergie")
+                else:
+                    st.success("✅ Énergie équilibrée")
+
+                if total_pdin < besoins['pdin'] * 0.9:
+                    st.warning("⚠️ Apport protéique insuffisant")
+                elif total_pdin > besoins['pdin'] * 1.1:
+                    st.warning("⚠️ Excès de protéines")
+                else:
+                    st.success("✅ Protéines équilibrées")
 
 # -----------------------------------------------------------------------------
 # PAGE EXPORT (avec inclusion des photos)

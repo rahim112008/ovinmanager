@@ -751,26 +751,65 @@ def page_genomique():
 def page_composition():
     st.title("🥩 Composition Corporelle Estimée")
     st.markdown("Estimation détaillée de la répartition viande/graisse/os basée sur les équations zootechniques")
+
+    # Récupération des brebis de l'utilisateur
+    brebis_list = db.fetchall("""
+        SELECT b.id, b.numero_id, b.nom, b.race, e.nom
+        FROM brebis b
+        JOIN elevages e ON b.elevage_id = e.id
+        JOIN eleveurs el ON e.eleveur_id = el.id
+        WHERE el.user_id=?
+    """, (st.session_state.user_id,))
     
+    brebis_options = {f"{b[0]} - {b[1]} {b[2]} ({b[4]})": b[0] for b in brebis_list}
+    brebis_options["Saisie manuelle (animal non enregistré)"] = None
+
+    mode = st.radio("Mode de saisie", ["Sélectionner une brebis existante", "Saisie manuelle"])
+
+    if mode == "Sélectionner une brebis existante":
+        selected = st.selectbox("Choisir une brebis", list(brebis_options.keys()))
+        brebis_id = brebis_options[selected]
+        if brebis_id is not None:
+            # Récupérer les infos de la brebis
+            info = db.fetchone("SELECT poids_vif, race, etat_physio FROM brebis WHERE id=?", (brebis_id,))
+            if info:
+                poids_def = info[0] if info[0] is not None else 45.0
+                race_def = info[1] if info[1] else "Autre"
+                etat_def = info[2] if info[2] else "Tarie"
+            else:
+                poids_def = 45.0
+                race_def = "Autre"
+                etat_def = "Tarie"
+        else:
+            poids_def = 45.0
+            race_def = "Autre"
+            etat_def = "Tarie"
+    else:
+        brebis_id = None
+        poids_def = 45.0
+        race_def = "Autre"
+        etat_def = "Tarie"
+
+    # Formulaire de saisie des paramètres
     col1, col2, col3 = st.columns(3)
-    
     with col1:
-        poids_vif = st.number_input("Poids vif (kg)", min_value=10.0, max_value=150.0, value=45.0, step=0.5)
+        poids_vif = st.number_input("Poids vif (kg)", min_value=10.0, max_value=150.0, value=poids_def, step=0.5)
     with col2:
-        race = st.selectbox("Race", list(Config.RACES.keys()))
+        race = st.selectbox("Race", list(Config.RACES.keys()), index=list(Config.RACES.keys()).index(race_def) if race_def in Config.RACES else 0)
     with col3:
         cc = st.slider("Condition Corporelle (1-5)", min_value=1.0, max_value=5.0, value=3.0, step=0.5,
                       help="1=Très maigre, 3=Idéal, 5=Très gras")
-    
+
     if st.button("🧮 Calculer la composition", use_container_width=True):
         comp = OvinScience.estimer_composition(poids_vif, race, cc)
-        
+
         if "erreur" in comp:
             st.error(comp["erreur"])
             return
-        
+
         st.subheader("📊 Résultats")
-        
+
+        # Affichage des métriques principales
         cols = st.columns(4)
         metrics = [
             ("🥩 Viande", comp['viande']['kg'], comp['viande']['pct'], Config.VERT),
@@ -778,7 +817,6 @@ def page_composition():
             ("🦴 Os", comp['os']['kg'], comp['os']['pct'], "grey"),
             ("📦 Carcasse", comp['poids_carcasse'], comp['rendement'], Config.BLEU)
         ]
-        
         for col, (label, kg, pct, color) in zip(cols, metrics):
             with col:
                 st.markdown(f"""
@@ -789,7 +827,8 @@ def page_composition():
                     <p style="margin: 0; font-size: 0.8rem; color: #666;">{pct}%</p>
                 </div>
                 """, unsafe_allow_html=True)
-        
+
+        # Graphique camembert
         fig = go.Figure(data=[go.Pie(
             labels=['Viande', 'Graisse', 'Os'],
             values=[comp['viande']['kg'], comp['graisse']['kg'], comp['os']['kg']],
@@ -797,14 +836,10 @@ def page_composition():
             hole=0.4
         )])
         fig.update_layout(title="Composition de la carcasse (kg)")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            st.subheader("🔪 Découpes principales")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Détails découpes
+        with st.expander("🔪 Détails des découpes"):
             decoupes_data = {
                 "Découpe": ["Gigot", "Épaule", "Côtelettes", "Poitrine"],
                 "Poids (kg)": [comp['decoupes']['gigot'], comp['decoupes']['epaule'],
@@ -813,12 +848,95 @@ def page_composition():
             }
             df_decoupes = pd.DataFrame(decoupes_data)
             st.dataframe(df_decoupes, hide_index=True, use_container_width=True)
-            
-            st.metric("Indice conformation", f"{comp['qualite']['conformation']}/15")
-            st.metric("Score gras", f"{comp['qualite']['gras']}/5")
-        
-        if st.button("💾 Enregistrer dans la base de données"):
-            st.success("Composition enregistrée !")
+
+        # Sauvegarde dans la base si une brebis est sélectionnée
+        if brebis_id is not None:
+            if st.button("💾 Enregistrer cette composition dans la base"):
+                # Insérer dans la table composition_corporelle
+                db.execute("""
+                    INSERT INTO composition_corporelle 
+                    (brebis_id, date_estimation, poids_vif, poids_carcasse, rendement_carcasse,
+                     poids_viande, pct_viande, poids_graisse, pct_graisse, poids_os, pct_os,
+                     gigot_poids, epaule_poids, cotelette_poids)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    brebis_id, datetime.now().isoformat(),
+                    poids_vif, comp['poids_carcasse'], comp['rendement'],
+                    comp['viande']['kg'], comp['viande']['pct'],
+                    comp['graisse']['kg'], comp['graisse']['pct'],
+                    comp['os']['kg'], comp['os']['pct'],
+                    comp['decoupes']['gigot'], comp['decoupes']['epaule'], comp['decoupes']['cotelette']
+                ))
+                st.success("Composition enregistrée pour cette brebis !")
+
+    # Section de comparaison entre plusieurs brebis
+    st.divider()
+    st.subheader("🔍 Comparer plusieurs brebis")
+
+    if len(brebis_list) >= 2:
+        # Sélection multiple de brebis
+        selected_ids = st.multiselect(
+            "Choisir les brebis à comparer",
+            options=list(brebis_options.keys()),
+            default=list(brebis_options.keys())[:min(2, len(brebis_options))]
+        )
+        # Filtrer pour ne garder que les IDs réels (exclure l'option manuelle)
+        selected_ids = [brebis_options[id_str] for id_str in selected_ids if brebis_options[id_str] is not None]
+
+        if len(selected_ids) >= 2:
+            # Récupérer les compositions enregistrées pour ces brebis
+            # On prend la plus récente pour chaque
+            comp_data = []
+            for bid in selected_ids:
+                row = db.fetchone("""
+                    SELECT poids_vif, poids_carcasse, rendement_carcasse,
+                           poids_viande, poids_graisse, poids_os, date_estimation
+                    FROM composition_corporelle
+                    WHERE brebis_id=?
+                    ORDER BY date_estimation DESC
+                    LIMIT 1
+                """, (bid,))
+                if row:
+                    # Récupérer le nom de la brebis
+                    name = db.fetchone("SELECT numero_id, nom FROM brebis WHERE id=?", (bid,))
+                    label = f"{name[0]} {name[1]}" if name else f"Brebis {bid}"
+                    comp_data.append({
+                        "id": bid,
+                        "nom": label,
+                        "poids_vif": row[0],
+                        "poids_carcasse": row[1],
+                        "rendement": row[2],
+                        "viande": row[3],
+                        "graisse": row[4],
+                        "os": row[5],
+                        "date": row[6]
+                    })
+            if comp_data:
+                df_comp = pd.DataFrame(comp_data)
+                # Graphique comparatif
+                fig_comp = go.Figure()
+                for animal in comp_data:
+                    fig_comp.add_trace(go.Bar(
+                        name=animal['nom'],
+                        x=['Viande', 'Graisse', 'Os'],
+                        y=[animal['viande'], animal['graisse'], animal['os']],
+                        text=[f"{animal['viande']} kg", f"{animal['graisse']} kg", f"{animal['os']} kg"],
+                        textposition='auto'
+                    ))
+                fig_comp.update_layout(
+                    title="Comparaison des compositions (kg)",
+                    barmode='group',
+                    yaxis_title="Poids (kg)"
+                )
+                st.plotly_chart(fig_comp, use_container_width=True)
+
+                # Tableau comparatif
+                st.dataframe(df_comp[['nom', 'poids_vif', 'poids_carcasse', 'rendement', 'viande', 'graisse', 'os']].round(2),
+                           use_container_width=True, hide_index=True)
+            else:
+                st.warning("Aucune composition enregistrée pour ces brebis. Calculez d'abord une composition et enregistrez-la.")
+    else:
+        st.info("Ajoutez au moins deux brebis et enregistrez leurs compositions pour activer la comparaison.")
 
 def page_prediction():
     st.title("🔮 Prédiction par Machine Learning")

@@ -37,7 +37,7 @@ try:
     profiling_available = True
 except ImportError:
     profiling_available = False
-    st.warning("Module ydata-profiling non disponible. L'analyse exploratoire avancée ne sera pas active, mais des statistiques descriptives sont disponibles.")
+    # Pas de warning ici pour éviter les messages intempestifs)
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION

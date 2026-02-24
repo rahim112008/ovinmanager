@@ -1463,7 +1463,7 @@ def page_gestion_elevage():
                 
                 # (Optionnel) suppression d'élevage...
     
-    # --- Onglet Brebis ---
+       # --- Onglet Brebis ---
     with tab3:
         st.subheader("Liste des brebis")
         
@@ -1482,7 +1482,8 @@ def page_gestion_elevage():
         if not elevages_dict:
             st.warning("Aucun élevage pour cet éleveur. Veuillez d'abord ajouter un élevage.")
         else:
-            with st.expander("➕ Ajouter une brebis"):
+            # --- Formulaire d'ajout de brebis ---
+            with st.expander("➕ Ajouter une brebis", expanded=False):
                 with st.form("form_brebis"):
                     elevage_choice = st.selectbox("Élevage", list(elevages_dict.keys()))
                     numero_id = st.text_input("Numéro d'identification")
@@ -1519,7 +1520,7 @@ def page_gestion_elevage():
                         st.success("Brebis ajoutée")
                         st.rerun()
             
-            # Récupérer les brebis de l'éleveur sélectionné
+            # --- Liste des brebis de l'éleveur actif ---
             params_brebis = [st.session_state.user_id]
             query_brebis = """
                 SELECT b.id, b.numero_id, b.nom, b.race, b.date_naissance, b.etat_physio, e.nom, b.poids_vif
@@ -1532,40 +1533,159 @@ def page_gestion_elevage():
             brebis = db.fetchall(query_brebis, params_brebis)
             
             if brebis:
-                df = pd.DataFrame(brebis, columns=["ID", "Numéro", "Nom", "Race", "Naissance", "État", "Élevage", "Poids vif (kg)"])
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                df_brebis = pd.DataFrame(brebis, columns=["ID", "Numéro", "Nom", "Race", "Naissance", "État", "Élevage", "Poids vif (kg)"])
+                st.dataframe(df_brebis, use_container_width=True, hide_index=True)
                 
-                with st.expander("🔧 Modifier / Supprimer une brebis"):
-                    choix = st.selectbox("Choisir une brebis", [f"{b[0]} - {b[1]} {b[2]}" for b in brebis], key="brebis_select")
-                    bid = int(choix.split(" - ")[0])
+                # --- Sélection d'une brebis pour le suivi individuel ---
+                st.divider()
+                st.subheader("🐑 Suivi individuel")
+                selected_brebis = st.selectbox("Choisir une brebis", [f"{b[0]} - {b[1]} {b[2]}" for b in brebis], key="suivi_select")
+                bid = int(selected_brebis.split(" - ")[0])
+                
+                # Récupérer les infos de la brebis
+                brebis_info = db.fetchone("SELECT numero_id, nom, race, date_naissance, poids_vif FROM brebis WHERE id=?", (bid,))
+                if brebis_info:
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Numéro", brebis_info[0])
+                    col2.metric("Nom", brebis_info[1])
+                    col3.metric("Race", brebis_info[2])
+                    age = (datetime.now() - datetime.strptime(brebis_info[3], "%Y-%m-%d")).days // 365 if brebis_info[3] else 0
+                    st.metric("Âge (ans)", age)
+                    st.metric("Dernier poids connu", f"{brebis_info[4]} kg" if brebis_info[4] else "Non renseigné")
+                
+                # --- Onglets pour les différentes données ---
+                tab_hist1, tab_hist2, tab_hist3, tab_hist4 = st.tabs(["📈 Poids", "🥛 Production", "📏 Morphométrie", "📝 Notes"])
+                
+                with tab_hist1:
+                    # Historique des poids (depuis composition_corporelle et mesures_morpho? ou directement poids_vif?)
+                    # On va utiliser les données de composition_corporelle
+                    poids_data = db.fetchall("""
+                        SELECT date_estimation, poids_vif FROM composition_corporelle 
+                        WHERE brebis_id=? ORDER BY date_estimation
+                    """, (bid,))
+                    if poids_data:
+                        df_poids = pd.DataFrame(poids_data, columns=["Date", "Poids (kg)"])
+                        df_poids["Date"] = pd.to_datetime(df_poids["Date"])
+                        fig_poids = px.line(df_poids, x="Date", y="Poids (kg)", title="Évolution du poids")
+                        st.plotly_chart(fig_poids, use_container_width=True)
+                    else:
+                        st.info("Aucune donnée de poids historique.")
                     
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("Supprimer cette brebis", key="del_brebis_btn"):
-                            photos = db.fetchone("SELECT photo_profil, photo_mamelle FROM brebis WHERE id=?", (bid,))
-                            if photos:
-                                for p in photos:
-                                    if p:
-                                        try:
-                                            os.remove(os.path.join(PHOTO_DIR, p))
-                                        except:
-                                            pass
-                            db.execute("DELETE FROM brebis WHERE id=?", (bid,))
-                            st.success("Brebis supprimée")
+                    # Formulaire pour ajouter un nouveau poids
+                    with st.form("form_poids"):
+                        new_poids = st.number_input("Nouveau poids (kg)", min_value=0.0, step=0.1)
+                        if st.form_submit_button("Ajouter ce poids"):
+                            # On insère dans composition_corporelle (avec des valeurs par défaut pour les autres champs)
+                            db.execute("""
+                                INSERT INTO composition_corporelle 
+                                (brebis_id, date_estimation, poids_vif, poids_carcasse, rendement_carcasse,
+                                 poids_viande, pct_viande, poids_graisse, pct_graisse, poids_os, pct_os,
+                                 gigot_poids, epaule_poids, cotelette_poids)
+                                VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+                            """, (bid, datetime.now().isoformat(), new_poids))
+                            st.success("Poids enregistré !")
                             st.rerun()
-                    with col2:
-                        if st.button("Voir détails", key="details_brebis_btn"):
-                            b = db.fetchone("SELECT * FROM brebis WHERE id=?", (bid,))
-                            cols = [col[0] for col in db.conn.execute("PRAGMA table_info(brebis)").fetchall()]
-                            data = dict(zip(cols, b))
-                            if data.get('photo_profil'):
-                                data['photo_profil'] = f"Fichier: {data['photo_profil']}"
-                            if data.get('photo_mamelle'):
-                                data['photo_mamelle'] = f"Fichier: {data['photo_mamelle']}"
-                            st.json(data)
+                
+                with tab_hist2:
+                    # Production laitière
+                    prod_data = db.fetchall("""
+                        SELECT date, quantite FROM productions WHERE brebis_id=? ORDER BY date
+                    """, (bid,))
+                    if prod_data:
+                        df_prod = pd.DataFrame(prod_data, columns=["Date", "Lait (L)"])
+                        df_prod["Date"] = pd.to_datetime(df_prod["Date"])
+                        fig_prod = px.line(df_prod, x="Date", y="Lait (L)", title="Production laitière")
+                        st.plotly_chart(fig_prod, use_container_width=True)
+                    else:
+                        st.info("Aucune donnée de production.")
+                    
+                    # Formulaire pour ajouter une production
+                    with st.form("form_prod_suivi"):
+                        date_prod = st.date_input("Date", value=datetime.today().date())
+                        quantite = st.number_input("Quantité (L)", min_value=0.0, step=0.1)
+                        if st.form_submit_button("Enregistrer production"):
+                            db.execute("INSERT INTO productions (brebis_id, date, quantite) VALUES (?, ?, ?)",
+                                      (bid, date_prod.isoformat(), quantite))
+                            st.success("Production enregistrée !")
+                            st.rerun()
+                
+                with tab_hist3:
+                    # Mesures morphométriques
+                    morpho_data = db.fetchall("""
+                        SELECT date_mesure, longueur_corps, hauteur_garrot, tour_poitrine, 
+                               circonference_canon, largeur_bassin, score_global
+                        FROM mesures_morpho WHERE brebis_id=? ORDER BY date_mesure
+                    """, (bid,))
+                    if morpho_data:
+                        df_morpho = pd.DataFrame(morpho_data, columns=["Date", "Longueur", "Hauteur", "Poitrine", "Canon", "Bassin", "Score"])
+                        df_morpho["Date"] = pd.to_datetime(df_morpho["Date"])
+                        st.dataframe(df_morpho.drop(columns=["Date"]), use_container_width=True, hide_index=True)
+                        
+                        # Évolution du score
+                        fig_score = px.line(df_morpho, x="Date", y="Score", title="Évolution du score morphologique")
+                        st.plotly_chart(fig_score, use_container_width=True)
+                    else:
+                        st.info("Aucune mesure morphométrique.")
+                    
+                    # Lien vers la page d'analyse (avec un bouton)
+                    if st.button("📸 Aller à la photogrammétrie pour cette brebis"):
+                        st.session_state.current_page = "analyse"
+                        # On pourrait stocker l'ID de la brebis pour pré-sélectionner, mais c'est optionnel
+                        st.rerun()
+                
+                with tab_hist4:
+                    # Notes / diagnostics (table diagnostics)
+                    diag_data = db.fetchall("""
+                        SELECT date, maladie, symptomes, traitement FROM diagnostics WHERE brebis_id=? ORDER BY date DESC
+                    """, (bid,))
+                    if diag_data:
+                        df_diag = pd.DataFrame(diag_data, columns=["Date", "Maladie", "Symptômes", "Traitement"])
+                        st.dataframe(df_diag, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Aucune note de diagnostic.")
+                    
+                    # Formulaire pour ajouter une note
+                    with st.form("form_diag"):
+                        date_diag = st.date_input("Date", value=datetime.today().date())
+                        maladie = st.text_input("Maladie / Observation")
+                        symptomes = st.text_area("Symptômes")
+                        traitement = st.text_area("Traitement")
+                        if st.form_submit_button("Enregistrer"):
+                            db.execute("""
+                                INSERT INTO diagnostics (brebis_id, date, maladie, symptomes, traitement)
+                                VALUES (?, ?, ?, ?, ?)
+                            """, (bid, date_diag.isoformat(), maladie, symptomes, traitement))
+                            st.success("Note enregistrée !")
+                            st.rerun()
+                
+                # --- Boutons de suppression (à garder éventuellement) ---
+                st.divider()
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("🗑️ Supprimer cette brebis", key="del_brebis_suivi"):
+                        photos = db.fetchone("SELECT photo_profil, photo_mamelle FROM brebis WHERE id=?", (bid,))
+                        if photos:
+                            for p in photos:
+                                if p:
+                                    try:
+                                        os.remove(os.path.join(PHOTO_DIR, p))
+                                    except:
+                                        pass
+                        db.execute("DELETE FROM brebis WHERE id=?", (bid,))
+                        st.success("Brebis supprimée")
+                        st.rerun()
+                with col2:
+                    if st.button("📋 Voir détails complets", key="details_brebis_suivi"):
+                        b = db.fetchone("SELECT * FROM brebis WHERE id=?", (bid,))
+                        cols = [col[0] for col in db.conn.execute("PRAGMA table_info(brebis)").fetchall()]
+                        data = dict(zip(cols, b))
+                        if data.get('photo_profil'):
+                            data['photo_profil'] = f"Fichier: {data['photo_profil']}"
+                        if data.get('photo_mamelle'):
+                            data['photo_mamelle'] = f"Fichier: {data['photo_mamelle']}"
+                        st.json(data)
             else:
                 st.info("Aucune brebis enregistrée.")
-
 # -----------------------------------------------------------------------------
 # PAGE PRODUCTION LAITIÈRE (identique à avant, mais recopiée pour complétude)
 # -----------------------------------------------------------------------------

@@ -2791,7 +2791,18 @@ def page_export():
                 st.warning(f"La table {table} n'existe pas. Elle sera ignorée.")
                 data_frames[table] = pd.DataFrame()
                 continue
-            
+                        # --- DEBUG : afficher un aperçu des tables problématiques ---
+            st.write("**Diagnostic export**")
+            for t in ["mesures_morpho", "mesures_mamelles"]:
+                if t in data_frames:
+                    df = data_frames[t]
+                    st.write(f"Table {t} : {len(df)} lignes")
+                    if not df.empty:
+                        st.dataframe(df.head(3))
+                    else:
+                        st.write("→ Table vide")
+                else:
+                    st.write(f"Table {t} absente de data_frames")
             # Créer un dataframe vide avec ces colonnes
             df_empty = pd.DataFrame(columns=columns)
             

@@ -1,6 +1,6 @@
 # Dashboard Page
 
-from flask import Blueprint, render_template
+
 
 # Initialize the Blueprint
 page_dashboard = Blueprint('page_dashboard', __name__)

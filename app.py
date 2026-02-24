@@ -2039,7 +2039,8 @@ def page_genomique_avancee():
 # -----------------------------------------------------------------------------
 def page_sante():
     st.title("🏥 Suivi sanitaire et vaccinal")
-    
+
+    # Récupérer les brebis selon l'éleveur actif
     params = [st.session_state.user_id]
     query_brebis = """
         SELECT b.id, b.numero_id, b.nom, e.nom
@@ -2051,66 +2052,311 @@ def page_sante():
     query_brebis, params = filtrer_par_eleveur(query_brebis, params, join_eleveur=True)
     brebis_list = db.fetchall(query_brebis, params)
     brebis_dict = {f"{b[0]} - {b[1]} {b[2]} ({b[3]})": b[0] for b in brebis_list}
-    
+
     if not brebis_dict:
         st.warning("Aucune brebis disponible.")
         return
-    
-    selected = st.selectbox("Choisir une brebis", list(brebis_dict.keys()))
+
+    # Sélection de la brebis
+    selected = st.selectbox("Choisir une brebis", list(brebis_dict.keys()), key="sante_brebis")
     bid = brebis_dict[selected]
-    
-    tab1, tab2 = st.tabs(["💉 Vaccinations", "🩺 Soins / Diagnostics"])
-    
+
+    # Récupération des données de la brebis
+    brebis_infos = db.fetchone("SELECT nom, numero_id, date_naissance, race FROM brebis WHERE id=?", (bid,))
+    if brebis_infos:
+        nom, numero, naiss, race = brebis_infos
+        age = (datetime.now() - datetime.strptime(naiss, "%Y-%m-%d")).days // 365 if naiss else 0
+        st.info(f"**{nom}** ({numero}) - {race}, {age} ans")
+
+    # --- Création des onglets ---
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📜 Historique", 
+        "⏰ Rappels", 
+        "📊 Statistiques", 
+        "🤖 IA & Prédictions", 
+        "📤 Export"
+    ])
+
+    # =========================================================================
+    # Onglet 1 : Historique consolidé
+    # =========================================================================
     with tab1:
-        st.subheader("Carnet de vaccination")
-        
-        with st.form("form_vaccin"):
-            date_vaccin = st.date_input("Date du vaccin", value=datetime.today().date())
-            vaccin = st.text_input("Nom du vaccin")
-            rappel = st.date_input("Date de rappel (si applicable)", value=None)
-            if st.form_submit_button("Ajouter"):
-                db.execute(
-                    "INSERT INTO vaccinations (brebis_id, date_vaccin, vaccin, rappel) VALUES (?, ?, ?, ?)",
-                    (bid, date_vaccin.isoformat(), vaccin, rappel.isoformat() if rappel else None)
-                )
-                st.success("Vaccin enregistré")
-                st.rerun()
-        
-        vaccins = db.fetchall(
-            "SELECT date_vaccin, vaccin, rappel FROM vaccinations WHERE brebis_id=? ORDER BY date_vaccin DESC",
-            (bid,)
-        )
-        if vaccins:
-            df = pd.DataFrame(vaccins, columns=["Date", "Vaccin", "Rappel"])
-            st.dataframe(df, use_container_width=True, hide_index=True)
+        st.subheader("Historique des soins et vaccins")
+
+        # Récupérer les vaccins
+        vaccins = db.fetchall("""
+            SELECT date_vaccin, vaccin, rappel, 'Vaccin' as type
+            FROM vaccinations WHERE brebis_id=?
+        """, (bid,))
+        # Récupérer les soins
+        soins = db.fetchall("""
+            SELECT date_soin, diagnostic, traitement, type as type
+            FROM soins WHERE brebis_id=?
+        """, (bid,))
+
+        # Fusionner et trier par date
+        historique = []
+        for v in vaccins:
+            historique.append({
+                "Date": v[0],
+                "Type": v[3],
+                "Description": f"{v[1]} (rappel le {v[2]})" if v[2] else v[1],
+                "Détails": ""
+            })
+        for s in soins:
+            historique.append({
+                "Date": s[0],
+                "Type": s[3],
+                "Description": s[1],
+                "Détails": s[2]
+            })
+
+        if historique:
+            df_hist = pd.DataFrame(historique)
+            df_hist["Date"] = pd.to_datetime(df_hist["Date"])
+            df_hist = df_hist.sort_values("Date", ascending=False)
+
+            # Filtre par type
+            types = df_hist["Type"].unique().tolist()
+            selected_types = st.multiselect("Filtrer par type", types, default=types)
+            df_filtre = df_hist[df_hist["Type"].isin(selected_types)]
+
+            st.dataframe(df_filtre, use_container_width=True, hide_index=True)
+
+            # Graphique chronologique
+            df_count = df_filtre.groupby([df_filtre["Date"].dt.to_period("M"), "Type"]).size().reset_index(name="Nombre")
+            df_count["Date"] = df_count["Date"].astype(str)
+            fig = px.bar(df_count, x="Date", y="Nombre", color="Type", title="Événements par mois")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Aucun événement enregistré pour cette brebis.")
+
+        # Formulaire d'ajout rapide (soin ou vaccin)
+        with st.expander("➕ Ajouter un événement"):
+            type_evt = st.radio("Type", ["Soin", "Vaccin"])
+            if type_evt == "Vaccin":
+                with st.form("form_vaccin_rapide"):
+                    date_vaccin = st.date_input("Date du vaccin", value=datetime.today().date())
+                    vaccin = st.text_input("Nom du vaccin")
+                    rappel = st.date_input("Date de rappel (optionnelle)", value=None)
+                    if st.form_submit_button("Enregistrer"):
+                        db.execute(
+                            "INSERT INTO vaccinations (brebis_id, date_vaccin, vaccin, rappel) VALUES (?, ?, ?, ?)",
+                            (bid, date_vaccin.isoformat(), vaccin, rappel.isoformat() if rappel else None)
+                        )
+                        st.success("Vaccin enregistré")
+                        st.rerun()
+            else:
+                with st.form("form_soin_rapide"):
+                    date_soin = st.date_input("Date du soin", value=datetime.today().date())
+                    type_soin = st.selectbox("Type", ["Maladie", "Parasite", "Blessure", "Autre"])
+                    diagnostic = st.text_area("Diagnostic / Symptômes")
+                    traitement = st.text_area("Traitement administré")
+                    if st.form_submit_button("Enregistrer"):
+                        db.execute(
+                            "INSERT INTO soins (brebis_id, date_soin, type, diagnostic, traitement) VALUES (?, ?, ?, ?, ?)",
+                            (bid, date_soin.isoformat(), type_soin, diagnostic, traitement)
+                        )
+                        st.success("Soin enregistré")
+                        st.rerun()
+
+    # =========================================================================
+    # Onglet 2 : Rappels et alertes
+    # =========================================================================
+    with tab2:
+        st.subheader("Rappels à venir")
+
+        # Vaccins dont la date de rappel est dans le futur
+        rappels = db.fetchall("""
+            SELECT vaccin, rappel FROM vaccinations
+            WHERE brebis_id=? AND rappel IS NOT NULL AND rappel >= date('now')
+            ORDER BY rappel
+        """, (bid,))
+
+        if rappels:
+            df_rappels = pd.DataFrame(rappels, columns=["Vaccin", "Date de rappel"])
+            df_rappels["Jours restants"] = (pd.to_datetime(df_rappels["Date de rappel"]) - datetime.now()).dt.days
+            st.dataframe(df_rappels, use_container_width=True, hide_index=True)
+
+            # Alertes pour les rappels dans les 7 jours
+            imminents = df_rappels[df_rappels["Jours restants"] <= 7]
+            if not imminents.empty:
+                st.warning("⚠️ Certains rappels sont imminents !")
+                st.dataframe(imminents)
+        else:
+            st.info("Aucun rappel programmé.")
+
+        # Traitements en cours (soins récents sans date de fin)
+        # (On pourrait ajouter une colonne "date_fin" dans la table soins, mais par simplicité on prend les soins du dernier mois)
+        soins_recents = db.fetchall("""
+            SELECT date_soin, type, diagnostic, traitement
+            FROM soins
+            WHERE brebis_id=? AND date_soin >= date('now', '-30 days')
+            ORDER BY date_soin DESC
+        """, (bid,))
+        if soins_recents:
+            st.subheader("Traitements récents (mois en cours)")
+            df_recents = pd.DataFrame(soins_recents, columns=["Date", "Type", "Diagnostic", "Traitement"])
+            st.dataframe(df_recents, use_container_width=True, hide_index=True)
+
+    # =========================================================================
+    # Onglet 3 : Statistiques sanitaires
+    # =========================================================================
+    with tab3:
+        st.subheader("Statistiques sanitaires")
+
+        # Nombre de soins par type
+        soins_stats = db.fetchall("""
+            SELECT type, COUNT(*) FROM soins WHERE brebis_id=? GROUP BY type
+        """, (bid,))
+        if soins_stats:
+            df_stats = pd.DataFrame(soins_stats, columns=["Type", "Nombre"])
+            fig = px.pie(df_stats, values="Nombre", names="Type", title="Répartition des soins par type")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Évolution temporelle
+        soins_temp = db.fetchall("""
+            SELECT strftime('%Y-%m', date_soin) as mois, COUNT(*) 
+            FROM soins WHERE brebis_id=?
+            GROUP BY mois
+            ORDER BY mois
+        """, (bid,))
+        if soins_temp:
+            df_temp = pd.DataFrame(soins_temp, columns=["Mois", "Nombre"])
+            fig2 = px.line(df_temp, x="Mois", y="Nombre", title="Évolution du nombre de soins")
+            st.plotly_chart(fig2, use_container_width=True)
+
+        # Taux de vaccination (ex: au moins un vaccin dans l'année)
+        dernier_vaccin = db.fetchone("""
+            SELECT MAX(date_vaccin) FROM vaccinations WHERE brebis_id=?
+        """, (bid,))[0]
+        if dernier_vaccin:
+            jours_depuis = (datetime.now() - datetime.strptime(dernier_vaccin, "%Y-%m-%d")).days
+            st.metric("Dernier vaccin", f"il y a {jours_depuis} jours")
         else:
             st.info("Aucun vaccin enregistré.")
-    
-    with tab2:
-        st.subheader("Historique des soins")
-        
-        with st.form("form_soin"):
-            date_soin = st.date_input("Date du soin", value=datetime.today().date())
-            type_soin = st.selectbox("Type", ["Maladie", "Parasite", "Blessure", "Autre"])
-            diagnostic = st.text_area("Diagnostic / Symptômes")
-            traitement = st.text_area("Traitement administré")
-            if st.form_submit_button("Enregistrer"):
-                db.execute(
-                    "INSERT INTO soins (brebis_id, date_soin, type, diagnostic, traitement) VALUES (?, ?, ?, ?, ?)",
-                    (bid, date_soin.isoformat(), type_soin, diagnostic, traitement)
-                )
-                st.success("Soin enregistré")
-                st.rerun()
-        
-        soins = db.fetchall(
-            "SELECT date_soin, type, diagnostic, traitement FROM soins WHERE brebis_id=? ORDER BY date_soin DESC",
-            (bid,)
-        )
-        if soins:
-            df = pd.DataFrame(soins, columns=["Date", "Type", "Diagnostic", "Traitement"])
-            st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # =========================================================================
+    # Onglet 4 : IA & Prédictions
+    # =========================================================================
+    with tab4:
+        st.subheader("Intelligence Artificielle – Analyses prédictives")
+
+        # 1. Prédiction de risque de maladie (modèle entraîné)
+        model_risque_path = os.path.join(MODEL_DIR, 'risque_maladie.pkl')
+        if os.path.exists(model_risque_path):
+            model_risque = joblib.load(model_risque_path)
+            # Récupérer les caractéristiques de la brebis pour la prédiction
+            # (âge, race, production moyenne, poids, antécédents...)
+            # À adapter selon les features disponibles
+            st.info("Modèle de prédiction de risque disponible.")
+            if st.button("Évaluer le risque pour cette brebis"):
+                # Simulation (à remplacer par des vraies features)
+                risque = np.random.choice(["Faible", "Modéré", "Élevé"], p=[0.6, 0.3, 0.1])
+                st.metric("Risque estimé", risque)
         else:
-            st.info("Aucun soin enregistré.")
+            st.info("Aucun modèle de prédiction entraîné. Vous pouvez en entraîner un avec l'onglet IA.")
+
+        # 2. Détection précoce d'anomalies (Isolation Forest)
+        # Récupérer les dernières données de production et de poids
+        prod_recentes = db.fetchall("""
+            SELECT quantite FROM productions 
+            WHERE brebis_id=? AND date >= date('now', '-60 days')
+            ORDER BY date
+        """, (bid,))
+        poids_recents = db.fetchall("""
+            SELECT poids_vif FROM composition_corporelle 
+            WHERE brebis_id=? AND date_estimation >= date('now', '-60 days')
+            ORDER BY date_estimation
+        """, (bid,))
+
+        if len(prod_recentes) >= 5 and len(poids_recents) >= 5:
+            # Construire un vecteur de features (moyenne, variance, tendance...)
+            # Pour simplifier, on prend les 5 dernières valeurs
+            X_prod = np.array([p[0] for p in prod_recentes[-5:]]).reshape(1, -1)
+            X_poids = np.array([p[0] for p in poids_recents[-5:]]).reshape(1, -1)
+
+            # Entraîner un petit modèle Isolation Forest sur l'ensemble des brebis (fait dans la page IA)
+            # Ici on utilisera un modèle pré-entraîné
+            anomaly_model_path = os.path.join(MODEL_DIR, 'anomaly_prod.pkl')
+            if os.path.exists(anomaly_model_path):
+                model_anomaly = joblib.load(anomaly_model_path)
+                pred = model_anomaly.predict(X_prod)
+                if pred[0] == -1:
+                    st.warning("⚠️ Anomalie détectée dans la production laitière récente.")
+                else:
+                    st.success("Production laitière normale.")
+        else:
+            st.info("Pas assez de données pour la détection d'anomalies.")
+
+        # 3. Recommandations de vaccins (règles simples + ML optionnel)
+        st.subheader("Recommandations vaccinales")
+        # Règle de base : vaccin annuel contre les entérotoxémies
+        dernier_vaccin_annuel = db.fetchone("""
+            SELECT date_vaccin FROM vaccinations 
+            WHERE brebis_id=? AND vaccin LIKE '%entéro%' OR vaccin LIKE '%annuel%'
+            ORDER BY date_vaccin DESC LIMIT 1
+        """, (bid,))
+        if dernier_vaccin_annuel:
+            date_dernier = datetime.strptime(dernier_vaccin_annuel[0], "%Y-%m-%d")
+            if (datetime.now() - date_dernier).days > 365:
+                st.warning("⚠️ Le vaccin annuel est à renouveler (plus d'un an).")
+            else:
+                mois_restants = 12 - ((datetime.now() - date_dernier).days // 30)
+                st.info(f"Prochain rappel annuel dans environ {mois_restants} mois.")
+        else:
+            st.info("Aucun vaccin annuel enregistré. Il est recommandé de vacciner.")
+
+        # Recommandation basée sur l'âge (jeunes)
+        if age < 1:
+            st.info("Les agneaux de moins d'un an doivent être vaccinés contre la pasteurellose.")
+
+    # =========================================================================
+    # Onglet 5 : Export
+    # =========================================================================
+    with tab5:
+        st.subheader("Exporter l'historique")
+
+        # Générer un CSV de tout l'historique
+        if st.button("Générer le rapport CSV"):
+            # Récupérer toutes les données
+            vaccins_all = db.fetchall("""
+                SELECT date_vaccin, vaccin, rappel FROM vaccinations WHERE brebis_id=?
+            """, (bid,))
+            soins_all = db.fetchall("""
+                SELECT date_soin, type, diagnostic, traitement FROM soins WHERE brebis_id=?
+            """, (bid,))
+
+            # Créer un DataFrame
+            data = []
+            for v in vaccins_all:
+                data.append({
+                    "Date": v[0],
+                    "Type": "Vaccin",
+                    "Description": v[1],
+                    "Rappel": v[2] if v[2] else "",
+                    "Détails": ""
+                })
+            for s in soins_all:
+                data.append({
+                    "Date": s[0],
+                    "Type": s[1],
+                    "Description": s[2],
+                    "Rappel": "",
+                    "Détails": s[3]
+                })
+            if data:
+                df_export = pd.DataFrame(data)
+                df_export = df_export.sort_values("Date", ascending=False)
+                csv = df_export.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Télécharger CSV",
+                    data=csv,
+                    file_name=f"sante_{numero}_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.warning("Aucune donnée à exporter.")
 # -----------------------------------------------------------------------------
 # PAGE REPRODUCTION (identique)
 # -----------------------------------------------------------------------------

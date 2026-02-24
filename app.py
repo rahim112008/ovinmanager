@@ -2657,7 +2657,7 @@ def page_ia():
             else:
                 st.success("Aucune anomalie détectée.")
 
-    # --- Onglet 3 : Clustering des brebis ---
+        # --- Onglet 3 : Clustering des brebis ---
     with tab3:
         st.subheader("Clustering des brebis (K-Means)")
         # Récupérer les données
@@ -2676,29 +2676,37 @@ def page_ia():
         """
         query_brebis, params = filtrer_par_eleveur(query_brebis, params, join_eleveur=True)
         df = pd.read_sql_query(query_brebis, db.conn, params=params)
+        
         if df.empty:
-            st.warning("Aucune donnée disponible.")
+            st.warning("Aucune donnée disponible pour le clustering.")
         else:
             df['viande_estimee'] = df['poids_vif'] * 0.45
             df['prod_moy'] = df['prod_moy'].fillna(0)
             df['score_morpho'] = df['score_morpho'].fillna(0)
             
-            n_clusters = st.slider("Nombre de clusters", 2, 5, 3)
-            features = ['prod_moy', 'score_morpho', 'poids_vif', 'viande_estimee']
-            X = df[features].fillna(0)
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            clusters = kmeans.fit_predict(X_scaled)
-            df['cluster'] = clusters
-            
-            # Afficher les clusters
-            fig = px.scatter_3d(df, x='prod_moy', y='score_morpho', z='poids_vif', color='cluster',
-                                 hover_data=['numero_id', 'nom'], title="Clusters des brebis")
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Statistiques par cluster
-            st.dataframe(df.groupby('cluster')[features].mean().round(2))
+            n_brebis = len(df)
+            max_clusters = min(5, n_brebis)  # on ne peut pas avoir plus de clusters que de brebis
+            if max_clusters < 2:
+                st.warning(f"Pas assez de brebis ({n_brebis}) pour effectuer un clustering (minimum 2).")
+            else:
+                n_clusters = st.slider("Nombre de clusters", 2, max_clusters, min(3, max_clusters))
+                
+                features = ['prod_moy', 'score_morpho', 'poids_vif', 'viande_estimee']
+                X = df[features].fillna(0)
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X)
+                
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                clusters = kmeans.fit_predict(X_scaled)
+                df['cluster'] = clusters
+                
+                # Affichage 3D
+                fig = px.scatter_3d(df, x='prod_moy', y='score_morpho', z='poids_vif', color='cluster',
+                                     hover_data=['numero_id', 'nom'], title="Clusters des brebis")
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Statistiques par cluster
+                st.dataframe(df.groupby('cluster')[features].mean().round(2))
 
        # --- Onglet 4 : Analyse exploratoire (import) ---
     with tab4:

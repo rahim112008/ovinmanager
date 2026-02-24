@@ -1367,7 +1367,59 @@ def page_analyse():
 # -----------------------------------------------------------------------------
 def page_gestion_elevage():
     st.title("🐑 Gestion des élevages")
-    
+        # --- Résumé de l'éleveur actif ---
+    if st.session_state.eleveur_id is not None:
+        # Récupérer les informations de l'éleveur
+        eleveur = db.fetchone("SELECT nom, region FROM eleveurs WHERE id=?", (st.session_state.eleveur_id,))
+        if eleveur:
+            st.subheader(f"📊 Résumé de l'éleveur : {eleveur[0]} ({eleveur[1]})")
+            
+            # Statistiques globales
+            nb_elevages = db.fetchone("SELECT COUNT(*) FROM elevages WHERE eleveur_id=?", (st.session_state.eleveur_id,))[0]
+            nb_brebis = db.fetchone("""
+                SELECT COUNT(*) FROM brebis b
+                JOIN elevages e ON b.elevage_id = e.id
+                WHERE e.eleveur_id=?
+            """, (st.session_state.eleveur_id,))[0]
+            
+            prod_moy = db.fetchone("""
+                SELECT AVG(p.quantite)
+                FROM productions p
+                JOIN brebis b ON p.brebis_id = b.id
+                JOIN elevages e ON b.elevage_id = e.id
+                WHERE e.eleveur_id=? AND p.date >= date('now', '-30 days')
+            """, (st.session_state.eleveur_id,))[0]
+            
+            poids_moy = db.fetchone("""
+                SELECT AVG(b.poids_vif)
+                FROM brebis b
+                JOIN elevages e ON b.elevage_id = e.id
+                WHERE e.eleveur_id=?
+            """, (st.session_state.eleveur_id,))[0]
+            
+            # Affichage des métriques
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("🏡 Élevages", nb_elevages)
+            col2.metric("🐑 Brebis", nb_brebis)
+            col3.metric("🥛 Production moy. (L/j)", f"{prod_moy:.2f}" if prod_moy else "N/A")
+            col4.metric("⚖️ Poids moy. (kg)", f"{poids_moy:.1f}" if poids_moy else "N/A")
+            
+            # Graphique : répartition des races
+            races = db.fetchall("""
+                SELECT b.race, COUNT(*) 
+                FROM brebis b
+                JOIN elevages e ON b.elevage_id = e.id
+                WHERE e.eleveur_id=?
+                GROUP BY b.race
+            """, (st.session_state.eleveur_id,))
+            if races:
+                df_races = pd.DataFrame(races, columns=["Race", "Nombre"])
+                fig = px.pie(df_races, values="Nombre", names="Race", title="Répartition des races")
+                st.plotly_chart(fig, use_container_width=True)
+            
+            st.divider()
+    else:
+        st.info("👈 Sélectionnez un éleveur dans la barre latérale pour voir un résumé.")
     tab1, tab2, tab3 = st.tabs(["👨‍🌾 Éleveurs", "🏡 Élevages", "🐑 Brebis"])
     
     # --- Onglet Éleveurs ---

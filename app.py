@@ -2111,7 +2111,6 @@ def page_sante():
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.info("Aucun soin enregistré.")
-
 # -----------------------------------------------------------------------------
 # PAGE REPRODUCTION (identique)
 # -----------------------------------------------------------------------------

@@ -1160,6 +1160,30 @@ def page_prediction():
                     model, score = result
                     st.success(f"Modèle entraîné avec un score R² de {score:.2f} sur le test.")
 
+@st.cache_resource
+def load_animalpose_model():
+    """Charge le modèle Animal Pose depuis TF Hub."""
+    model = hub.load('https://tfhub.dev/google/animalpose/1')
+    return model
+
+animalpose_model = load_animalpose_model()
+
+def detect_animal_pose(image_np):
+    """
+    Détecte les points clés d'un animal dans l'image.
+    Retourne un array de shape (17, 3) : (x, y, confidence) pour chaque point.
+    """
+    input_size = 256
+    h, w, _ = image_np.shape
+    img_resized = cv2.resize(image_np, (input_size, input_size))
+    img_resized = img_resized.astype(np.float32) / 255.0
+    input_tensor = tf.convert_to_tensor(img_resized)[tf.newaxis, ...]
+
+    outputs = animalpose_model.signatures['serving_default'](input_tensor)
+    keypoints = outputs['keypoints'].numpy()[0]  # (17, 3) : x, y, score (normalisés)
+    keypoints[:, 0] *= w
+    keypoints[:, 1] *= h
+    return keypoints
 def page_analyse():
     st.title("📸 Analyse Photogrammétrique")
 

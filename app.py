@@ -1185,12 +1185,13 @@ def detect_animal_pose(image_np):
     keypoints[:, 1] *= h
     return keypoints
 def page_analyse():
-    st.title("📸 Analyse Photogrammétrique")
+   def page_analyse():
+    st.title("📸 Analyse Photogrammétrique Avancée (IA)")
 
     # Récupérer les brebis selon l'éleveur actif
     params = [st.session_state.user_id]
     query_brebis = """
-        SELECT b.id, b.numero_id, b.nom, e.nom, b.photo_profil, b.photo_mamelle
+        SELECT b.id, b.numero_id, b.nom, e.nom, b.photo_profil, b.photo_mamelle, b.race, b.poids_vif
         FROM brebis b
         JOIN elevages e ON b.elevage_id = e.id
         JOIN eleveurs el ON e.eleveur_id = el.id
@@ -1198,20 +1199,22 @@ def page_analyse():
     """
     query_brebis, params = filtrer_par_eleveur(query_brebis, params, join_eleveur=True)
     brebis_list = db.fetchall(query_brebis, params)
-    brebis_dict = {f"{b[0]} - {b[1]} {b[2]} ({b[3]})": b[0] for b in brebis_list}
+    brebis_dict = {f"{b[0]} - {b[1]} {b[2]} ({b[3]})": {"id": b[0], "race": b[6], "poids": b[7]} for b in brebis_list}
 
     if not brebis_dict:
         st.warning("Aucune brebis disponible pour cet éleveur.")
         return
 
-    selected_brebis = st.selectbox("Sélectionner la brebis", list(brebis_dict.keys()))
-    brebis_id = brebis_dict[selected_brebis]
+    selected = st.selectbox("Sélectionner la brebis", list(brebis_dict.keys()))
+    brebis_id = brebis_dict[selected]["id"]
+    race_def = brebis_dict[selected]["race"]
+    poids_def = brebis_dict[selected]["poids"] if brebis_dict[selected]["poids"] else 45.0
 
     # Récupérer les infos de la brebis
-    brebis_info = db.fetchone("SELECT date_naissance, race, photo_profil, photo_mamelle FROM brebis WHERE id=?", (brebis_id,))
+    brebis_info = db.fetchone("SELECT date_naissance, photo_profil, photo_mamelle FROM brebis WHERE id=?", (brebis_id,))
     if brebis_info:
-        date_naiss = datetime.strptime(brebis_info[0], "%Y-%m-%d").date()
-        age_jours = (datetime.today().date() - date_naiss).days
+        date_naiss = datetime.strptime(brebis_info[0], "%Y-%m-%d").date() if brebis_info[0] else None
+        age_jours = (datetime.today().date() - date_naiss).days if date_naiss else 0
         age_mois = age_jours // 30
         age_dents = "Inconnu"
         if age_mois < 12:
@@ -1222,8 +1225,8 @@ def page_analyse():
             age_dents = "4 dents"
         else:
             age_dents = "6 dents ou plus"
-        profil_file = brebis_info[2]
-        mamelle_file = brebis_info[3]
+        profil_file = brebis_info[1]
+        mamelle_file = brebis_info[2]
     else:
         age_mois = 0
         age_dents = "Inconnu"
@@ -1232,77 +1235,125 @@ def page_analyse():
 
     st.info(f"Âge estimé : {age_mois} mois ({age_dents})")
 
-    # Afficher la photo de profil existante si disponible
     if profil_file and os.path.exists(os.path.join(PHOTO_DIR, profil_file)):
         st.image(os.path.join(PHOTO_DIR, profil_file), caption="Photo de profil existante", width=300)
 
-    tab1, tab2 = st.tabs(["📏 Morphométrie Corps", "🥛 Analyse Mamelles"])
+    tab1, tab2 = st.tabs(["📏 Morphométrie Corps (IA)", "🥛 Analyse Mamelles"])
 
     with tab1:
-        st.subheader("Mesures corporelles")
+        st.subheader("Mesures corporelles par IA (Animal Pose)")
 
-        # Option de capture via caméra ou upload
         source = st.radio("Source de l'image", ["Télécharger un fichier", "Prendre une photo"])
-        uploaded_files = None
+        uploaded_file = None
         camera_image = None
         if source == "Télécharger un fichier":
-            uploaded_files = st.file_uploader("Photos de profil (plusieurs acceptées)", 
-                                              type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
+            uploaded_file = st.file_uploader("Photo de profil", type=['jpg', 'png', 'jpeg'])
         else:
             camera_image = st.camera_input("Prendre une photo")
 
-        # Afficher les images
-        if uploaded_files:
-            cols = st.columns(min(3, len(uploaded_files)))
-            for i, file in enumerate(uploaded_files):
-                with cols[i % 3]:
-                    img = Image.open(file)
-                    st.image(img, caption=f"Photo {i+1}", use_column_width=True)
-        if camera_image:
-            st.image(camera_image, caption="Photo prise", use_column_width=True)
+        image = None
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file)
+            image_np = np.array(image)
+        elif camera_image is not None:
+            image = Image.open(camera_image)
+            image_np = np.array(image)
 
-        # Saisie manuelle des mesures
-        col1, col2 = st.columns(2)
-        with col1:
-            etalon = st.selectbox("Étalon de calibration", 
-                                 list(Config.ETALONS.keys()),
-                                 format_func=lambda x: Config.ETALONS[x]['nom'])
-        with col2:
-            mode_age = st.radio("Mode d'âge", ["Mois", "Dentition"])
-            if mode_age == "Mois":
-                age_saisi = st.number_input("Âge (mois)", min_value=0, value=age_mois)
+        if image is not None:
+            st.image(image, caption="Image chargée", use_column_width=True)
+            img_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+            # Calibration automatique
+            st.subheader("🔍 Calibration automatique")
+            circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=50,
+                                       param1=50, param2=30, minRadius=10, maxRadius=100)
+            pixel_per_cm = None
+            if circles is not None:
+                circles = np.round(circles[0, :]).astype("int")
+                circles = sorted(circles, key=lambda x: x[2], reverse=True)
+                x, y, r = circles[0]
+                cv2.circle(img_cv, (x, y), r, (0, 255, 0), 2)
+                st.image(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB), caption="Pièce détectée (cercle vert)", use_column_width=True)
+                diametre_reel_cm = 2.95
+                diametre_pixels = 2 * r
+                pixel_per_cm = diametre_pixels / diametre_reel_cm
+                st.success(f"Calibration : {pixel_per_cm:.2f} pixels/cm")
             else:
-                age_saisi_dent = st.selectbox("Dentition", ["Dents de lait", "2 dents", "4 dents", "6 dents ou plus"])
+                st.warning("Pièce non détectée. Veuillez saisir l'échelle manuellement.")
+                objet_etalon = st.selectbox("Étalon", list(Config.ETALONS.keys()), format_func=lambda x: Config.ETALONS[x]['nom'])
+                taille_reelle = Config.ETALONS[objet_etalon].get('largeur') or Config.ETALONS[objet_etalon].get('diametre')
+                if taille_reelle:
+                    taille_pixels = st.number_input("Taille de l'étalon en pixels", min_value=1.0, value=100.0)
+                    pixel_per_cm = taille_pixels / taille_reelle
 
-        longueur = st.number_input("Longueur corps (cm)", min_value=30.0, max_value=120.0, value=70.0)
-        hauteur = st.number_input("Hauteur garrot (cm)", min_value=30.0, max_value=90.0, value=65.0)
-        poitrine = st.number_input("Tour de poitrine (cm)", min_value=40.0, max_value=130.0, value=80.0)
-        canon = st.number_input("Circonférence canon (cm)", min_value=5.0, max_value=15.0, value=8.0)
-        bassin = st.number_input("Largeur bassin (cm)", min_value=10.0, max_value=40.0, value=20.0)
+            # Détection des points clés
+            with st.spinner("Analyse de l'animal par IA..."):
+                keypoints = detect_animal_pose(image_np)
 
-        # Estimation du poids à partir des mensurations (formule approximative)
-        poids_estime = (longueur * poitrine * hauteur) / 3000
-        st.info(f"Poids estimé à partir des mensurations : **{poids_estime:.1f} kg**")
+            # Indices des points d'intérêt
+            idx_garrot = 5
+            idx_epaule_g = 7
+            idx_epaule_d = 8
+            idx_ischion_g = 15
+            idx_ischion_d = 16
+            pattes_indices = [9,10,11,12,13,14]
+            points_pattes = keypoints[pattes_indices, :]
+            point_bas = points_pattes[np.argmax(points_pattes[:, 1])]
+            point_haut = keypoints[idx_garrot]
 
-        if st.button("🤖 Calculer score et analyser"):
-            # Score morphologique
-            score = OvinScience.calcul_score_morpho(longueur, hauteur, poitrine, canon, bassin)
-            fig = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=score,
-                domain={'x': [0,1], 'y':[0,1]},
-                title={'text': "Score Morphologique"},
-                gauge={'axis': {'range': [None, 100]},
-                       'bar': {'color': Config.VERT if score>70 else Config.ORANGE if score>50 else Config.ROUGE},
-                       'steps': [
-                           {'range': [0,50], 'color': "lightgray"},
-                           {'range': [50,70], 'color': "yellow"},
-                           {'range': [70,100], 'color': "lightgreen"}]}
-            ))
-            st.plotly_chart(fig, use_container_width=True)
+            # Épaule moyenne
+            if keypoints[idx_epaule_g, 2] > 0.2 and keypoints[idx_epaule_d, 2] > 0.2:
+                epaule = (keypoints[idx_epaule_g, :2] + keypoints[idx_epaule_d, :2]) / 2
+            else:
+                epaule = keypoints[idx_epaule_g, :2] if keypoints[idx_epaule_g, 2] > keypoints[idx_epaule_d, 2] else keypoints[idx_epaule_d, :2]
 
-            # Sauvegarde dans la table mesures_morpho
-            if st.button("💾 Enregistrer ces mesures pour suivi"):
+            # Ischion moyen
+            if keypoints[idx_ischion_g, 2] > 0.2 and keypoints[idx_ischion_d, 2] > 0.2:
+                ischion = (keypoints[idx_ischion_g, :2] + keypoints[idx_ischion_d, :2]) / 2
+            else:
+                ischion = keypoints[idx_ischion_g, :2] if keypoints[idx_ischion_g, 2] > keypoints[idx_ischion_d, 2] else keypoints[idx_ischion_d, :2]
+
+            # Affichage des points
+            img_points = img_cv.copy()
+            for i, (x, y, conf) in enumerate(keypoints):
+                if conf > 0.2:
+                    cv2.circle(img_points, (int(x), int(y)), 4, (0,0,255), -1)
+            st.image(cv2.cvtColor(img_points, cv2.COLOR_BGR2RGB), caption="Points clés détectés", use_column_width=True)
+
+            # Calcul des dimensions
+            if pixel_per_cm is not None:
+                hauteur_px = abs(point_haut[1] - point_bas[1])
+                hauteur_cm = hauteur_px / pixel_per_cm
+                longueur_px = distance.euclidean(epaule, ischion)
+                longueur_cm = longueur_px / pixel_per_cm
+                st.success(f"**Hauteur au garrot estimée :** {hauteur_cm:.1f} cm")
+                st.success(f"**Longueur du corps estimée :** {longueur_cm:.1f} cm")
+            else:
+                hauteur_cm = None
+                longueur_cm = None
+                st.warning("Calibration manquante, impossible d'obtenir les dimensions en cm.")
+
+            # Saisie manuelle des autres mesures
+            with st.expander("✏️ Saisie manuelle des autres mesures"):
+                longueur = st.number_input("Longueur corps (cm)", value=longueur_cm if longueur_cm else 70.0, step=0.5)
+                hauteur = st.number_input("Hauteur garrot (cm)", value=hauteur_cm if hauteur_cm else 65.0, step=0.5)
+                poitrine = st.number_input("Tour poitrine (cm)", value=80.0, step=0.5)
+                canon = st.number_input("Circonférence canon (cm)", value=8.0, step=0.5)
+                bassin = st.number_input("Largeur bassin (cm)", value=20.0, step=0.5)
+
+            # Estimation du poids
+            poids_estime = (poitrine ** 2 * longueur) / 10800
+            coeff_race = 1.0
+            if race_def == "Ouled Djellal":
+                coeff_race = 1.1
+            elif race_def == "Sidahou":
+                coeff_race = 0.9
+            poids_estime *= coeff_race
+            st.info(f"Poids estimé : **{poids_estime:.1f} kg**")
+
+            if st.button("✅ Valider et enregistrer les mesures"):
+                score = OvinScience.calcul_score_morpho(longueur, hauteur, poitrine, canon, bassin)
                 db.execute("""
                     INSERT INTO mesures_morpho 
                     (brebis_id, date_mesure, longueur_corps, hauteur_garrot, tour_poitrine,
@@ -1312,42 +1363,19 @@ def page_analyse():
                     brebis_id, datetime.now().isoformat(),
                     longueur, hauteur, poitrine, canon, bassin, score
                 ))
+                db.execute("UPDATE brebis SET poids_vif=? WHERE id=?", (poids_estime, brebis_id))
                 st.success("Mesures enregistrées !")
-
-            # Analyse d'image avancée (simulation)
-            if uploaded_files or camera_image:
-                st.subheader("🔍 Diagnostic visuel (simulation IA)")
-                maladies = ["Aucune anomalie", "Légère boiterie", "Problème de mamelle", "État corporel faible"]
-                diag = random.choices(maladies, weights=[0.7, 0.1, 0.1, 0.1])[0]
-                etat_corporel = random.choice(["Maigre", "Idéal", "Gras"])
-                st.write(f"**Diagnostic :** {diag}")
-                st.write(f"**État corporel estimé :** {etat_corporel}")
-                if diag != "Aucune anomalie":
-                    st.warning(f"⚠️ Alerte : {diag} détecté. Consulter un vétérinaire.")
-                else:
-                    st.success("✅ Animal sain (simulation).")
+                st.rerun()
 
     with tab2:
         st.subheader("Scoring mamelles")
-
-        # Afficher la photo mamelle existante si disponible
+        # (Gardez le code existant de l'analyse des mamelles)
         if mamelle_file and os.path.exists(os.path.join(PHOTO_DIR, mamelle_file)):
             st.image(os.path.join(PHOTO_DIR, mamelle_file), caption="Mamelle existante", width=300)
-
-        # Nouvelle photo
-        mamelle_source = st.radio("Source image mamelle", ["Télécharger", "Prendre photo"], key="mamelle_source")
-        mamelle_file_upload = None
-        mamelle_camera = None
-        if mamelle_source == "Télécharger":
-            mamelle_file_upload = st.file_uploader("Vue arrière mamelles", type=['jpg','png','jpeg'], key="mamelle_img")
-        else:
-            mamelle_camera = st.camera_input("Prendre photo mamelle", key="mamelle_camera")
-
-        if mamelle_file_upload:
-            img_mam = Image.open(mamelle_file_upload)
+        mamelle_upload = st.file_uploader("Vue arrière mamelles (nouvelle photo)", type=['jpg','png','jpeg'], key="mamelle_img")
+        if mamelle_upload:
+            img_mam = Image.open(mamelle_upload)
             st.image(img_mam, caption="Mamelle uploadée", width=300)
-        if mamelle_camera:
-            st.image(mamelle_camera, caption="Mamelle prise", width=300)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -1369,7 +1397,6 @@ def page_analyse():
             else:
                 st.warning("⚠️ Conformation à améliorer")
 
-            # Sauvegarde dans mesures_mamelles
             if st.button("💾 Enregistrer mesures mamelles"):
                 db.execute("""
                     INSERT INTO mesures_mamelles 
@@ -1380,15 +1407,6 @@ def page_analyse():
                     long_trayon, diam_trayon, symetrie, attache, forme, score
                 ))
                 st.success("Mesures mamelles enregistrées !")
-
-            # Diagnostic mammaire (simulation)
-            if mamelle_file_upload or mamelle_camera:
-                st.subheader("🔍 Diagnostic mammaire (simulation IA)")
-                if score < 6 or forme == "Bifide" or attache == "Pendante":
-                    st.warning("Suspicion de problèmes mammaires. Consulter un vétérinaire.")
-                else:
-                    st.success("Aspect sain (simulation).")
-
 # -----------------------------------------------------------------------------
 # PAGE GESTION ÉLEVAGE (identique à avant, mais nous devons la recopier pour être complet)
 # -----------------------------------------------------------------------------

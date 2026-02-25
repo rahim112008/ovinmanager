@@ -15,4 +15,6 @@ streamlit-pandas-profiling
 joblib
 scikit-learn
 setuptools
+tensorflow
+tensorflow-hub
 wheel

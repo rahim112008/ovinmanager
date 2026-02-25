@@ -22,6 +22,9 @@ import uuid
 from scipy.optimize import linprog
 import joblib
 import random
+import tensorflow as tf
+import tensorflow_hub as hub
+from scipy.spatial import distance
 
 # Machine Learning
 from sklearn.ensemble import RandomForestRegressor, IsolationForest

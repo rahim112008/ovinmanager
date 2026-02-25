@@ -9,7 +9,6 @@ scipy
 statsmodels
 openpyxl
 xlsxwriter
-tensorflow
 ydata-profiling
 streamlit-pandas-profiling
 joblib
@@ -18,3 +17,5 @@ setuptools
 tensorflow
 tensorflow-hub
 wheel
+
+

@@ -37,7 +37,9 @@ try:
     profiling_available = True
 except ImportError:
     profiling_available = False
-    # Pas de warning ici pour éviter les messages intempestifs)
+
+# Traitement d'image
+import cv2
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION
@@ -688,6 +690,56 @@ def detect_anomalies(df, contamination=0.1):
     return preds
 
 # -----------------------------------------------------------------------------
+# FONCTIONS DE DÉTECTION D'ÉTALON (NOUVELLES)
+# -----------------------------------------------------------------------------
+def detecter_baton(image):
+    """Détecte un bâton (ligne longue) dans l'image et retourne ses extrémités et sa longueur en pixels."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=100, maxLineGap=10)
+    if lines is not None:
+        max_len = 0
+        best_line = None
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+            if length > max_len:
+                max_len = length
+                best_line = (x1, y1, x2, y2)
+        return best_line, max_len
+    return None, 0
+
+def detecter_feuille(image):
+    """Détecte une feuille A4 (rectangle) et retourne son contour et la longueur du grand côté en pixels."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours:
+        peri = cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+        if len(approx) == 4:  # rectangle
+            (x, y, w, h) = cv2.boundingRect(approx)
+            long_cote = max(w, h)
+            return approx, long_cote
+    return None, 0
+
+def detecter_piece(image):
+    """Détecte une pièce (cercle) et retourne (centre, rayon) et le diamètre en pixels."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=100,
+                               param1=50, param2=30, minRadius=10, maxRadius=100)
+    if circles is not None:
+        circles = np.round(circles[0, :]).astype("int")
+        max_radius = 0
+        best_circle = None
+        for (x, y, r) in circles:
+            if r > max_radius:
+                max_radius = r
+                best_circle = (x, y, r)
+        return best_circle, 2 * max_radius
+    return None, 0
+
+# -----------------------------------------------------------------------------
 # PAGES DE L'APPLICATION
 # -----------------------------------------------------------------------------
 
@@ -1160,6 +1212,18 @@ def page_prediction():
 def page_analyse():
     st.title("📸 Analyse Photogrammétrique")
 
+    # Initialisation des variables de session pour les mesures automatiques
+    if 'longueur_corps' not in st.session_state:
+        st.session_state['longueur_corps'] = 70.0
+    if 'hauteur_garrot' not in st.session_state:
+        st.session_state['hauteur_garrot'] = 65.0
+    if 'tour_poitrine' not in st.session_state:
+        st.session_state['tour_poitrine'] = 80.0
+    if 'circonf_canon' not in st.session_state:
+        st.session_state['circonf_canon'] = 8.0
+    if 'largeur_bassin' not in st.session_state:
+        st.session_state['largeur_bassin'] = 20.0
+
     # Récupérer les brebis selon l'éleveur actif
     params = [st.session_state.user_id]
     query_brebis = """
@@ -1234,26 +1298,113 @@ def page_analyse():
         if camera_image:
             st.image(camera_image, caption="Photo prise", use_column_width=True)
 
-        # Saisie manuelle des mesures
+        # Type d'étalon
+        etalon = st.selectbox("Étalon de calibration", 
+                              list(Config.ETALONS.keys()),
+                              format_func=lambda x: Config.ETALONS[x]['nom'])
+
+        # --- NOUVEAU : Analyse d'image automatique ---
+        if (uploaded_files or camera_image) and st.button("🔍 Lancer l'analyse d'image (détection étalon)"):
+            # Récupérer la première image
+            if uploaded_files:
+                img_pil = Image.open(uploaded_files[0])
+            else:
+                img_pil = Image.open(camera_image)
+            
+            # Convertir en array OpenCV (BGR)
+            img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+            
+            reel_dim = None
+            if etalon == "baton_1m":
+                line, len_px = detecter_baton(img_cv)
+                if line is not None:
+                    reel_dim = 100  # cm
+                    facteur = len_px / reel_dim
+                    st.success(f"✅ Bâton détecté : {len_px:.1f} pixels → {facteur:.2f} px/cm")
+                    # Dessiner la ligne sur l'image
+                    img_cv_ligne = img_cv.copy()
+                    cv2.line(img_cv_ligne, (line[0], line[1]), (line[2], line[3]), (0,255,0), 3)
+                    st.image(cv2.cvtColor(img_cv_ligne, cv2.COLOR_BGR2RGB), caption="Bâton détecté")
+                    st.session_state['facteur_echelle'] = facteur
+                else:
+                    st.error("❌ Bâton non détecté. Vérifiez l'image (contraste, visibilité).")
+            elif etalon == "a4":
+                rect, long_px = detecter_feuille(img_cv)
+                if rect is not None:
+                    reel_dim = 29.7  # cm (grand côté de la feuille A4)
+                    facteur = long_px / reel_dim
+                    st.success(f"✅ Feuille détectée : grand côté = {long_px:.1f} pixels → {facteur:.2f} px/cm")
+                    # Dessiner le rectangle
+                    img_cv_rect = img_cv.copy()
+                    cv2.drawContours(img_cv_rect, [rect], -1, (0,255,0), 3)
+                    st.image(cv2.cvtColor(img_cv_rect, cv2.COLOR_BGR2RGB), caption="Feuille détectée")
+                    st.session_state['facteur_echelle'] = facteur
+                else:
+                    st.error("❌ Feuille non détectée.")
+            elif etalon == "piece_100da":
+                circle, diam_px = detecter_piece(img_cv)
+                if circle is not None:
+                    reel_dim = 2.95  # cm (29.5 mm)
+                    facteur = diam_px / reel_dim
+                    st.success(f"✅ Pièce détectée : diamètre = {diam_px:.1f} pixels → {facteur:.2f} px/cm")
+                    # Dessiner le cercle
+                    img_cv_circle = img_cv.copy()
+                    cv2.circle(img_cv_circle, (circle[0], circle[1]), circle[2], (0,255,0), 3)
+                    st.image(cv2.cvtColor(img_cv_circle, cv2.COLOR_BGR2RGB), caption="Pièce détectée")
+                    st.session_state['facteur_echelle'] = facteur
+                else:
+                    st.error("❌ Pièce non détectée.")
+            else:
+                st.warning("⚠️ Ce type d'étalon n'est pas supporté pour la détection automatique.")
+
+        # Si un facteur d'échelle est connu, proposer une saisie assistée
+        if 'facteur_echelle' in st.session_state:
+            st.subheader("📏 Mesure assistée par l'image")
+            st.write("Entrez la longueur en pixels de la partie à mesurer (vous pouvez utiliser un outil externe comme GIMP pour mesurer sur l'image).")
+            col_px1, col_px2, col_px3 = st.columns(3)
+            with col_px1:
+                pixels_longueur = st.number_input("Longueur corps (pixels)", min_value=1.0, step=1.0, key="px_longueur")
+            with col_px2:
+                pixels_hauteur = st.number_input("Hauteur garrot (pixels)", min_value=1.0, step=1.0, key="px_hauteur")
+            with col_px3:
+                pixels_poitrine = st.number_input("Tour de poitrine (pixels)", min_value=1.0, step=1.0, key="px_poitrine")
+            col_px4, col_px5 = st.columns(2)
+            with col_px4:
+                pixels_canon = st.number_input("Circonférence canon (pixels)", min_value=1.0, step=1.0, key="px_canon")
+            with col_px5:
+                pixels_bassin = st.number_input("Largeur bassin (pixels)", min_value=1.0, step=1.0, key="px_bassin")
+            
+            if st.button("📐 Convertir les pixels en cm et appliquer"):
+                facteur = st.session_state['facteur_echelle']
+                st.session_state['longueur_corps'] = pixels_longueur / facteur if pixels_longueur > 0 else 70.0
+                st.session_state['hauteur_garrot'] = pixels_hauteur / facteur if pixels_hauteur > 0 else 65.0
+                st.session_state['tour_poitrine'] = pixels_poitrine / facteur if pixels_poitrine > 0 else 80.0
+                st.session_state['circonf_canon'] = pixels_canon / facteur if pixels_canon > 0 else 8.0
+                st.session_state['largeur_bassin'] = pixels_bassin / facteur if pixels_bassin > 0 else 20.0
+                st.success("✅ Mesures converties et appliquées ! Vous pouvez maintenant calculer le score.")
+                st.rerun()
+
+        # Saisie manuelle des mesures (valeurs dynamiques depuis session_state)
         col1, col2 = st.columns(2)
         with col1:
-            etalon = st.selectbox("Étalon de calibration", 
-                                 list(Config.ETALONS.keys()),
-                                 format_func=lambda x: Config.ETALONS[x]['nom'])
-        with col2:
             mode_age = st.radio("Mode d'âge", ["Mois", "Dentition"])
             if mode_age == "Mois":
                 age_saisi = st.number_input("Âge (mois)", min_value=0, value=age_mois)
             else:
                 age_saisi_dent = st.selectbox("Dentition", ["Dents de lait", "2 dents", "4 dents", "6 dents ou plus"])
 
-        longueur = st.number_input("Longueur corps (cm)", min_value=30.0, max_value=120.0, value=70.0)
-        hauteur = st.number_input("Hauteur garrot (cm)", min_value=30.0, max_value=90.0, value=65.0)
-        poitrine = st.number_input("Tour de poitrine (cm)", min_value=40.0, max_value=130.0, value=80.0)
-        canon = st.number_input("Circonférence canon (cm)", min_value=5.0, max_value=15.0, value=8.0)
-        bassin = st.number_input("Largeur bassin (cm)", min_value=10.0, max_value=40.0, value=20.0)
+        longueur = st.number_input("Longueur corps (cm)", min_value=30.0, max_value=120.0, 
+                                   value=st.session_state['longueur_corps'], key="longueur_corps_input")
+        hauteur = st.number_input("Hauteur garrot (cm)", min_value=30.0, max_value=90.0, 
+                                  value=st.session_state['hauteur_garrot'], key="hauteur_garrot_input")
+        poitrine = st.number_input("Tour de poitrine (cm)", min_value=40.0, max_value=130.0, 
+                                   value=st.session_state['tour_poitrine'], key="tour_poitrine_input")
+        canon = st.number_input("Circonférence canon (cm)", min_value=5.0, max_value=15.0, 
+                                value=st.session_state['circonf_canon'], key="circonf_canon_input")
+        bassin = st.number_input("Largeur bassin (cm)", min_value=10.0, max_value=40.0, 
+                                 value=st.session_state['largeur_bassin'], key="largeur_bassin_input")
 
-        # Estimation du poids à partir des mensurations (formule approximative)
+        # Estimation du poids à partir des mensurations
         poids_estime = (longueur * poitrine * hauteur) / 3000
         st.info(f"Poids estimé à partir des mensurations : **{poids_estime:.1f} kg**")
 
@@ -1363,18 +1514,17 @@ def page_analyse():
                     st.success("Aspect sain (simulation).")
 
 # -----------------------------------------------------------------------------
-# PAGE GESTION ÉLEVAGE (identique à avant, mais nous devons la recopier pour être complet)
+# PAGE GESTION ÉLEVAGE
 # -----------------------------------------------------------------------------
 def page_gestion_elevage():
     st.title("🐑 Gestion des élevages")
-        # --- Résumé de l'éleveur actif ---
+    
+    # Résumé de l'éleveur actif
     if st.session_state.eleveur_id is not None:
-        # Récupérer les informations de l'éleveur
         eleveur = db.fetchone("SELECT nom, region FROM eleveurs WHERE id=?", (st.session_state.eleveur_id,))
         if eleveur:
             st.subheader(f"📊 Résumé de l'éleveur : {eleveur[0]} ({eleveur[1]})")
             
-            # Statistiques globales
             nb_elevages = db.fetchone("SELECT COUNT(*) FROM elevages WHERE eleveur_id=?", (st.session_state.eleveur_id,))[0]
             nb_brebis = db.fetchone("""
                 SELECT COUNT(*) FROM brebis b
@@ -1397,14 +1547,12 @@ def page_gestion_elevage():
                 WHERE e.eleveur_id=?
             """, (st.session_state.eleveur_id,))[0]
             
-            # Affichage des métriques
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("🏡 Élevages", nb_elevages)
             col2.metric("🐑 Brebis", nb_brebis)
             col3.metric("🥛 Production moy. (L/j)", f"{prod_moy:.2f}" if prod_moy else "N/A")
             col4.metric("⚖️ Poids moy. (kg)", f"{poids_moy:.1f}" if poids_moy else "N/A")
             
-            # Graphique : répartition des races
             races = db.fetchall("""
                 SELECT b.race, COUNT(*) 
                 FROM brebis b
@@ -1420,6 +1568,7 @@ def page_gestion_elevage():
             st.divider()
     else:
         st.info("👈 Sélectionnez un éleveur dans la barre latérale pour voir un résumé.")
+    
     tab1, tab2, tab3 = st.tabs(["👨‍🌾 Éleveurs", "🏡 Élevages", "🐑 Brebis"])
     
     # --- Onglet Éleveurs ---
@@ -1463,23 +1612,18 @@ def page_gestion_elevage():
         else:
             st.info("Aucun éleveur enregistré.")
     
-       # --- Onglet Élevages ---
+    # --- Onglet Élevages ---
     with tab2:
         st.subheader("Liste des élevages")
         
-        # Récupérer tous les éleveurs de l'utilisateur
         eleveurs_list = db.fetchall(
             "SELECT id, nom FROM eleveurs WHERE user_id=?", (st.session_state.user_id,)
         )
-        # DEBUG : afficher le nombre d'éleveurs
-        st.info(f"Nombre d'éleveurs trouvés : {len(eleveurs_list)}")
-        
         eleveurs_dict = {f"{e[0]} - {e[1]}": e[0] for e in eleveurs_list}
         
         if not eleveurs_dict:
             st.warning("Vous devez d'abord ajouter un éleveur.")
         else:
-            # Expandeur ouvert par défaut
             with st.expander("➕ Ajouter un élevage", expanded=True):
                 with st.form("form_elevage"):
                     eleveur_choice = st.selectbox("Éleveur", list(eleveurs_dict.keys()))
@@ -1496,7 +1640,6 @@ def page_gestion_elevage():
                         st.success("Élevage ajouté")
                         st.rerun()
             
-            # Ensuite, afficher la liste des élevages (filtrée par l'éleveur actif)
             params = [st.session_state.user_id]
             query = """
                 SELECT e.id, e.nom, e.localisation, e.superficie, el.nom
@@ -1512,14 +1655,11 @@ def page_gestion_elevage():
             else:
                 df = pd.DataFrame(elevages, columns=["ID", "Nom", "Localisation", "Superficie", "Éleveur"])
                 st.dataframe(df, use_container_width=True, hide_index=True)
-                
-                # (Optionnel) suppression d'élevage...
     
-       # --- Onglet Brebis ---
+    # --- Onglet Brebis ---
     with tab3:
         st.subheader("Liste des brebis")
         
-        # Récupérer les élevages de l'éleveur sélectionné (pour formulaire d'ajout)
         params_elev = [st.session_state.user_id]
         query_elev = """
             SELECT e.id, e.nom, el.nom
@@ -1534,7 +1674,6 @@ def page_gestion_elevage():
         if not elevages_dict:
             st.warning("Aucun élevage pour cet éleveur. Veuillez d'abord ajouter un élevage.")
         else:
-            # --- Formulaire d'ajout de brebis ---
             with st.expander("➕ Ajouter une brebis", expanded=False):
                 with st.form("form_brebis"):
                     elevage_choice = st.selectbox("Élevage", list(elevages_dict.keys()))
@@ -1549,7 +1688,6 @@ def page_gestion_elevage():
                     
                     submitted = st.form_submit_button("Ajouter")
                     if submitted:
-                        # Vérifier si la colonne poids_vif existe
                         cursor = db.conn.execute("PRAGMA table_info(brebis)")
                         columns = [col[1] for col in cursor.fetchall()]
                         if 'poids_vif' not in columns:
@@ -1572,7 +1710,6 @@ def page_gestion_elevage():
                         st.success("Brebis ajoutée")
                         st.rerun()
             
-            # --- Liste des brebis de l'éleveur actif ---
             params_brebis = [st.session_state.user_id]
             query_brebis = """
                 SELECT b.id, b.numero_id, b.nom, b.race, b.date_naissance, b.etat_physio, e.nom, b.poids_vif
@@ -1588,13 +1725,11 @@ def page_gestion_elevage():
                 df_brebis = pd.DataFrame(brebis, columns=["ID", "Numéro", "Nom", "Race", "Naissance", "État", "Élevage", "Poids vif (kg)"])
                 st.dataframe(df_brebis, use_container_width=True, hide_index=True)
                 
-                # --- Sélection d'une brebis pour le suivi individuel ---
                 st.divider()
                 st.subheader("🐑 Suivi individuel")
                 selected_brebis = st.selectbox("Choisir une brebis", [f"{b[0]} - {b[1]} {b[2]}" for b in brebis], key="suivi_select")
                 bid = int(selected_brebis.split(" - ")[0])
                 
-                # Récupérer les infos de la brebis
                 brebis_info = db.fetchone("SELECT numero_id, nom, race, date_naissance, poids_vif FROM brebis WHERE id=?", (bid,))
                 if brebis_info:
                     col1, col2, col3 = st.columns(3)
@@ -1605,12 +1740,9 @@ def page_gestion_elevage():
                     st.metric("Âge (ans)", age)
                     st.metric("Dernier poids connu", f"{brebis_info[4]} kg" if brebis_info[4] else "Non renseigné")
                 
-                # --- Onglets pour les différentes données ---
                 tab_hist1, tab_hist2, tab_hist3, tab_hist4 = st.tabs(["📈 Poids", "🥛 Production", "📏 Morphométrie", "📝 Notes"])
                 
                 with tab_hist1:
-                    # Historique des poids (depuis composition_corporelle et mesures_morpho? ou directement poids_vif?)
-                    # On va utiliser les données de composition_corporelle
                     poids_data = db.fetchall("""
                         SELECT date_estimation, poids_vif FROM composition_corporelle 
                         WHERE brebis_id=? ORDER BY date_estimation
@@ -1623,11 +1755,9 @@ def page_gestion_elevage():
                     else:
                         st.info("Aucune donnée de poids historique.")
                     
-                    # Formulaire pour ajouter un nouveau poids
                     with st.form("form_poids"):
                         new_poids = st.number_input("Nouveau poids (kg)", min_value=0.0, step=0.1)
                         if st.form_submit_button("Ajouter ce poids"):
-                            # On insère dans composition_corporelle (avec des valeurs par défaut pour les autres champs)
                             db.execute("""
                                 INSERT INTO composition_corporelle 
                                 (brebis_id, date_estimation, poids_vif, poids_carcasse, rendement_carcasse,
@@ -1639,7 +1769,6 @@ def page_gestion_elevage():
                             st.rerun()
                 
                 with tab_hist2:
-                    # Production laitière
                     prod_data = db.fetchall("""
                         SELECT date, quantite FROM productions WHERE brebis_id=? ORDER BY date
                     """, (bid,))
@@ -1651,7 +1780,6 @@ def page_gestion_elevage():
                     else:
                         st.info("Aucune donnée de production.")
                     
-                    # Formulaire pour ajouter une production
                     with st.form("form_prod_suivi"):
                         date_prod = st.date_input("Date", value=datetime.today().date())
                         quantite = st.number_input("Quantité (L)", min_value=0.0, step=0.1)
@@ -1662,7 +1790,6 @@ def page_gestion_elevage():
                             st.rerun()
                 
                 with tab_hist3:
-                    # Mesures morphométriques
                     morpho_data = db.fetchall("""
                         SELECT date_mesure, longueur_corps, hauteur_garrot, tour_poitrine, 
                                circonference_canon, largeur_bassin, score_global
@@ -1673,20 +1800,16 @@ def page_gestion_elevage():
                         df_morpho["Date"] = pd.to_datetime(df_morpho["Date"])
                         st.dataframe(df_morpho.drop(columns=["Date"]), use_container_width=True, hide_index=True)
                         
-                        # Évolution du score
                         fig_score = px.line(df_morpho, x="Date", y="Score", title="Évolution du score morphologique")
                         st.plotly_chart(fig_score, use_container_width=True)
                     else:
                         st.info("Aucune mesure morphométrique.")
                     
-                    # Lien vers la page d'analyse (avec un bouton)
                     if st.button("📸 Aller à la photogrammétrie pour cette brebis"):
                         st.session_state.current_page = "analyse"
-                        # On pourrait stocker l'ID de la brebis pour pré-sélectionner, mais c'est optionnel
                         st.rerun()
                 
                 with tab_hist4:
-                    # Notes / diagnostics (table diagnostics)
                     diag_data = db.fetchall("""
                         SELECT date, maladie, symptomes, traitement FROM diagnostics WHERE brebis_id=? ORDER BY date DESC
                     """, (bid,))
@@ -1696,7 +1819,6 @@ def page_gestion_elevage():
                     else:
                         st.info("Aucune note de diagnostic.")
                     
-                    # Formulaire pour ajouter une note
                     with st.form("form_diag"):
                         date_diag = st.date_input("Date", value=datetime.today().date())
                         maladie = st.text_input("Maladie / Observation")
@@ -1710,7 +1832,6 @@ def page_gestion_elevage():
                             st.success("Note enregistrée !")
                             st.rerun()
                 
-                # --- Boutons de suppression (à garder éventuellement) ---
                 st.divider()
                 col1, col2 = st.columns(2)
                 with col1:
@@ -1738,8 +1859,9 @@ def page_gestion_elevage():
                         st.json(data)
             else:
                 st.info("Aucune brebis enregistrée.")
+
 # -----------------------------------------------------------------------------
-# PAGE PRODUCTION LAITIÈRE (identique à avant, mais recopiée pour complétude)
+# PAGE PRODUCTION LAITIÈRE
 # -----------------------------------------------------------------------------
 def page_production():
     st.title("🥛 Production laitière et analyses biochimiques")
@@ -1797,7 +1919,6 @@ def page_production():
             st.info("Aucune donnée pour cette brebis.")
         
         st.subheader("Production par éleveur")
-        # Ici on veut la production de tous les éleveurs de l'utilisateur (pas filtré par éleveur actif)
         data_all = db.fetchall("""
             SELECT el.nom AS eleveur, b.numero_id, p.date, p.quantite
             FROM productions p
@@ -1870,14 +1991,13 @@ def page_production():
             st.info("Aucune analyse biochimique.")
 
 # -----------------------------------------------------------------------------
-# PAGE GÉNOMIQUE AVANCÉE (corrigée, avec les modifications)
+# PAGE GÉNOMIQUE AVANCÉE
 # -----------------------------------------------------------------------------
 def page_genomique_avancee():
     st.title("🧬 Génomique avancée")
     
     tab1, tab2, tab3 = st.tabs(["🔍 BLAST", "🧬 SNPs d'intérêt", "📊 GWAS"])
     
-    # Récupérer les brebis de l'éleveur sélectionné (pour la sélection)
     params = [st.session_state.user_id]
     query_brebis = """
         SELECT b.id, b.numero_id, b.nom
@@ -2035,12 +2155,11 @@ def page_genomique_avancee():
                 st.error(f"Erreur lors de l'analyse : {e}")
 
 # -----------------------------------------------------------------------------
-# PAGE SANTÉ (identique)
+# PAGE SANTÉ
 # -----------------------------------------------------------------------------
 def page_sante():
     st.title("🏥 Suivi sanitaire et vaccinal")
 
-    # Récupérer les brebis selon l'éleveur actif
     params = [st.session_state.user_id]
     query_brebis = """
         SELECT b.id, b.numero_id, b.nom, e.nom
@@ -2057,18 +2176,15 @@ def page_sante():
         st.warning("Aucune brebis disponible.")
         return
 
-    # Sélection de la brebis
     selected = st.selectbox("Choisir une brebis", list(brebis_dict.keys()), key="sante_brebis")
     bid = brebis_dict[selected]
 
-    # Récupération des données de la brebis
     brebis_infos = db.fetchone("SELECT nom, numero_id, date_naissance, race FROM brebis WHERE id=?", (bid,))
     if brebis_infos:
         nom, numero, naiss, race = brebis_infos
         age = (datetime.now() - datetime.strptime(naiss, "%Y-%m-%d")).days // 365 if naiss else 0
         st.info(f"**{nom}** ({numero}) - {race}, {age} ans")
 
-    # --- Création des onglets ---
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📜 Historique", 
         "⏰ Rappels", 
@@ -2077,24 +2193,17 @@ def page_sante():
         "📤 Export"
     ])
 
-    # =========================================================================
-    # Onglet 1 : Historique consolidé
-    # =========================================================================
     with tab1:
         st.subheader("Historique des soins et vaccins")
-
-        # Récupérer les vaccins
         vaccins = db.fetchall("""
             SELECT date_vaccin, vaccin, rappel, 'Vaccin' as type
             FROM vaccinations WHERE brebis_id=?
         """, (bid,))
-        # Récupérer les soins
         soins = db.fetchall("""
             SELECT date_soin, diagnostic, traitement, type as type
             FROM soins WHERE brebis_id=?
         """, (bid,))
 
-        # Fusionner et trier par date
         historique = []
         for v in vaccins:
             historique.append({
@@ -2116,14 +2225,12 @@ def page_sante():
             df_hist["Date"] = pd.to_datetime(df_hist["Date"])
             df_hist = df_hist.sort_values("Date", ascending=False)
 
-            # Filtre par type
             types = df_hist["Type"].unique().tolist()
             selected_types = st.multiselect("Filtrer par type", types, default=types)
             df_filtre = df_hist[df_hist["Type"].isin(selected_types)]
 
             st.dataframe(df_filtre, use_container_width=True, hide_index=True)
 
-            # Graphique chronologique
             df_count = df_filtre.groupby([df_filtre["Date"].dt.to_period("M"), "Type"]).size().reset_index(name="Nombre")
             df_count["Date"] = df_count["Date"].astype(str)
             fig = px.bar(df_count, x="Date", y="Nombre", color="Type", title="Événements par mois")
@@ -2131,7 +2238,6 @@ def page_sante():
         else:
             st.info("Aucun événement enregistré pour cette brebis.")
 
-        # Formulaire d'ajout rapide (soin ou vaccin)
         with st.expander("➕ Ajouter un événement"):
             type_evt = st.radio("Type", ["Soin", "Vaccin"])
             if type_evt == "Vaccin":
@@ -2160,13 +2266,8 @@ def page_sante():
                         st.success("Soin enregistré")
                         st.rerun()
 
-    # =========================================================================
-    # Onglet 2 : Rappels et alertes
-    # =========================================================================
     with tab2:
         st.subheader("Rappels à venir")
-
-        # Vaccins dont la date de rappel est dans le futur
         rappels = db.fetchall("""
             SELECT vaccin, rappel FROM vaccinations
             WHERE brebis_id=? AND rappel IS NOT NULL AND rappel >= date('now')
@@ -2178,7 +2279,6 @@ def page_sante():
             df_rappels["Jours restants"] = (pd.to_datetime(df_rappels["Date de rappel"]) - datetime.now()).dt.days
             st.dataframe(df_rappels, use_container_width=True, hide_index=True)
 
-            # Alertes pour les rappels dans les 7 jours
             imminents = df_rappels[df_rappels["Jours restants"] <= 7]
             if not imminents.empty:
                 st.warning("⚠️ Certains rappels sont imminents !")
@@ -2186,8 +2286,6 @@ def page_sante():
         else:
             st.info("Aucun rappel programmé.")
 
-        # Traitements en cours (soins récents sans date de fin)
-        # (On pourrait ajouter une colonne "date_fin" dans la table soins, mais par simplicité on prend les soins du dernier mois)
         soins_recents = db.fetchall("""
             SELECT date_soin, type, diagnostic, traitement
             FROM soins
@@ -2199,13 +2297,8 @@ def page_sante():
             df_recents = pd.DataFrame(soins_recents, columns=["Date", "Type", "Diagnostic", "Traitement"])
             st.dataframe(df_recents, use_container_width=True, hide_index=True)
 
-    # =========================================================================
-    # Onglet 3 : Statistiques sanitaires
-    # =========================================================================
     with tab3:
         st.subheader("Statistiques sanitaires")
-
-        # Nombre de soins par type
         soins_stats = db.fetchall("""
             SELECT type, COUNT(*) FROM soins WHERE brebis_id=? GROUP BY type
         """, (bid,))
@@ -2214,7 +2307,6 @@ def page_sante():
             fig = px.pie(df_stats, values="Nombre", names="Type", title="Répartition des soins par type")
             st.plotly_chart(fig, use_container_width=True)
 
-        # Évolution temporelle
         soins_temp = db.fetchall("""
             SELECT strftime('%Y-%m', date_soin) as mois, COUNT(*) 
             FROM soins WHERE brebis_id=?
@@ -2226,7 +2318,6 @@ def page_sante():
             fig2 = px.line(df_temp, x="Mois", y="Nombre", title="Évolution du nombre de soins")
             st.plotly_chart(fig2, use_container_width=True)
 
-        # Taux de vaccination (ex: au moins un vaccin dans l'année)
         dernier_vaccin = db.fetchone("""
             SELECT MAX(date_vaccin) FROM vaccinations WHERE brebis_id=?
         """, (bid,))[0]
@@ -2236,29 +2327,19 @@ def page_sante():
         else:
             st.info("Aucun vaccin enregistré.")
 
-    # =========================================================================
-    # Onglet 4 : IA & Prédictions
-    # =========================================================================
     with tab4:
         st.subheader("Intelligence Artificielle – Analyses prédictives")
 
-        # 1. Prédiction de risque de maladie (modèle entraîné)
         model_risque_path = os.path.join(MODEL_DIR, 'risque_maladie.pkl')
         if os.path.exists(model_risque_path):
             model_risque = joblib.load(model_risque_path)
-            # Récupérer les caractéristiques de la brebis pour la prédiction
-            # (âge, race, production moyenne, poids, antécédents...)
-            # À adapter selon les features disponibles
             st.info("Modèle de prédiction de risque disponible.")
             if st.button("Évaluer le risque pour cette brebis"):
-                # Simulation (à remplacer par des vraies features)
                 risque = np.random.choice(["Faible", "Modéré", "Élevé"], p=[0.6, 0.3, 0.1])
                 st.metric("Risque estimé", risque)
         else:
             st.info("Aucun modèle de prédiction entraîné. Vous pouvez en entraîner un avec l'onglet IA.")
 
-        # 2. Détection précoce d'anomalies (Isolation Forest)
-        # Récupérer les dernières données de production et de poids
         prod_recentes = db.fetchall("""
             SELECT quantite FROM productions 
             WHERE brebis_id=? AND date >= date('now', '-60 days')
@@ -2271,13 +2352,9 @@ def page_sante():
         """, (bid,))
 
         if len(prod_recentes) >= 5 and len(poids_recents) >= 5:
-            # Construire un vecteur de features (moyenne, variance, tendance...)
-            # Pour simplifier, on prend les 5 dernières valeurs
             X_prod = np.array([p[0] for p in prod_recentes[-5:]]).reshape(1, -1)
             X_poids = np.array([p[0] for p in poids_recents[-5:]]).reshape(1, -1)
 
-            # Entraîner un petit modèle Isolation Forest sur l'ensemble des brebis (fait dans la page IA)
-            # Ici on utilisera un modèle pré-entraîné
             anomaly_model_path = os.path.join(MODEL_DIR, 'anomaly_prod.pkl')
             if os.path.exists(anomaly_model_path):
                 model_anomaly = joblib.load(anomaly_model_path)
@@ -2289,9 +2366,7 @@ def page_sante():
         else:
             st.info("Pas assez de données pour la détection d'anomalies.")
 
-        # 3. Recommandations de vaccins (règles simples + ML optionnel)
         st.subheader("Recommandations vaccinales")
-        # Règle de base : vaccin annuel contre les entérotoxémies
         dernier_vaccin_annuel = db.fetchone("""
             SELECT date_vaccin FROM vaccinations 
             WHERE brebis_id=? AND vaccin LIKE '%entéro%' OR vaccin LIKE '%annuel%'
@@ -2307,19 +2382,12 @@ def page_sante():
         else:
             st.info("Aucun vaccin annuel enregistré. Il est recommandé de vacciner.")
 
-        # Recommandation basée sur l'âge (jeunes)
         if age < 1:
             st.info("Les agneaux de moins d'un an doivent être vaccinés contre la pasteurellose.")
 
-    # =========================================================================
-    # Onglet 5 : Export
-    # =========================================================================
     with tab5:
         st.subheader("Exporter l'historique")
-
-        # Générer un CSV de tout l'historique
         if st.button("Générer le rapport CSV"):
-            # Récupérer toutes les données
             vaccins_all = db.fetchall("""
                 SELECT date_vaccin, vaccin, rappel FROM vaccinations WHERE brebis_id=?
             """, (bid,))
@@ -2327,7 +2395,6 @@ def page_sante():
                 SELECT date_soin, type, diagnostic, traitement FROM soins WHERE brebis_id=?
             """, (bid,))
 
-            # Créer un DataFrame
             data = []
             for v in vaccins_all:
                 data.append({
@@ -2357,8 +2424,9 @@ def page_sante():
                 )
             else:
                 st.warning("Aucune donnée à exporter.")
+
 # -----------------------------------------------------------------------------
-# PAGE REPRODUCTION (identique)
+# PAGE REPRODUCTION
 # -----------------------------------------------------------------------------
 def page_reproduction():
     st.title("🤰 Gestion de la reproduction")
@@ -2463,7 +2531,7 @@ def page_reproduction():
             st.dataframe(df, use_container_width=True, hide_index=True)
 
 # -----------------------------------------------------------------------------
-# PAGE NUTRITION AVANCÉE (avec optimisation)
+# PAGE NUTRITION AVANCÉE
 # -----------------------------------------------------------------------------
 def page_nutrition_avancee():
     st.title("🌾 Nutrition avancée et formulation")
@@ -2593,7 +2661,6 @@ def page_nutrition_avancee():
     with tab3:
         st.subheader("Calcul de ration personnalisée")
 
-        # Récupérer les brebis de l'éleveur actif
         params = [st.session_state.user_id]
         query_brebis = """
             SELECT b.id, b.numero_id, b.nom, b.etat_physio, b.poids_vif
@@ -2636,7 +2703,6 @@ def page_nutrition_avancee():
             if not aliments:
                 st.warning("Ajoutez d'abord des aliments.")
             else:
-                # Deux modes : manuel ou optimisation automatique
                 mode_ration = st.radio("Mode de composition", ["Manuel", "Optimisation automatique (coût minimum)"])
 
                 if mode_ration == "Manuel":
@@ -2683,46 +2749,30 @@ def page_nutrition_avancee():
                         else:
                             st.success("✅ Protéines équilibrées")
                 else:
-                    # Optimisation automatique
                     st.subheader("Optimisation de la ration (coût minimum)")
 
-                    # Préparer les données pour l'optimisation
                     n = len(aliments)
-                    c = [a[6] for a in aliments]  # prix
-                    # Matrice des contraintes A_ub * x <= b_ub
-                    # On veut : somme(x_i * uem_i) >= besoin_uem  =>  -somme(...) <= -besoin
-                    # De même pour PDIN
-                    # Pour MS : somme(x_i * ms_i/100) <= besoin_ms (car ms est en %)
+                    c = [a[6] for a in aliments]
                     A_ub = []
                     b_ub = []
-                    # UEM (>=)
                     A_ub.append([-a[3] for a in aliments])
                     b_ub.append(-besoins['uem'])
-                    # PDIN (>=)
                     A_ub.append([-a[4] for a in aliments])
                     b_ub.append(-besoins['pdin'])
-                    # MS (<=)
-                    A_ub.append([a[5]/100 for a in aliments])  # convertir % en fraction
+                    A_ub.append([a[5]/100 for a in aliments])
                     b_ub.append(besoins['ms'])
 
-                    # Bornes : x_i >= 0
                     bounds = [(0, None) for _ in range(n)]
 
-                    # Tolérance optionnelle : on peut ajouter des marges
                     tolerance = st.slider("Tolérance sur les besoins (%)", 0, 20, 10) / 100
-                    # On ajuste les b_ub pour UEM et PDIN avec la tolérance
-                    # UEM : on veut >= besoin*(1-tol) pour être sûr de couvrir
                     b_ub[0] = -besoins['uem'] * (1 - tolerance)
                     b_ub[1] = -besoins['pdin'] * (1 - tolerance)
-                    # MS : on veut <= besoin*(1+tol) pour éviter excès
                     b_ub[2] = besoins['ms'] * (1 + tolerance)
 
-                    # Résoudre
                     res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
 
                     if res.success:
                         quantites = res.x
-                        # Filtrer les aliments avec quantité > 0.01
                         ration_opt = []
                         for i, q in enumerate(quantites):
                             if q > 0.01:
@@ -2740,7 +2790,6 @@ def page_nutrition_avancee():
                             st.dataframe(df_opt[["nom", "qte", "Coût (DA/jour)"]].round(2), use_container_width=True, hide_index=True)
                             total_opt = df_opt["Coût (DA/jour)"].sum()
                             st.metric("Coût optimal journalier", f"{total_opt:.2f} DA")
-                            # Vérification
                             uem_tot = sum(q * aliments[i][3] for i, q in enumerate(quantites))
                             pdin_tot = sum(q * aliments[i][4] for i, q in enumerate(quantites))
                             ms_tot = sum(q * aliments[i][5]/100 for i, q in enumerate(quantites))
@@ -2755,7 +2804,7 @@ def page_nutrition_avancee():
             st.info("Aucune brebis disponible. Vous pouvez utiliser 'Personnalisé'.")
 
 # -----------------------------------------------------------------------------
-# PAGE EXPORT (identique)
+# PAGE EXPORT
 # -----------------------------------------------------------------------------
 def page_export():
     st.title("📤 Export des données")
@@ -2765,7 +2814,6 @@ def page_export():
     inclure_photos = st.checkbox("Inclure les photos dans l'archive (pour CSV uniquement)", value=True)
     
     if st.button("Générer l'export"):
-        # Liste des tables à exporter (dans l'ordre)
         all_tables = [
             "eleveurs", "elevages", "brebis", 
             "productions", "mesures_morpho", "mesures_mamelles", "composition_corporelle",
@@ -2773,41 +2821,24 @@ def page_export():
             "aliments", "rations", "ration_composition"
         ]
         
-        # Obtenir la liste des tables réellement présentes dans la base
         cursor = db.conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
         existing_tables = [row[0] for row in cursor.fetchall()]
         
         data_frames = {}
         
         for table in all_tables:
-            # Déterminer les colonnes de la table (si elle existe)
             if table in existing_tables:
                 cursor = db.conn.execute(f"PRAGMA table_info({table})")
                 columns_info = cursor.fetchall()
                 columns = [col[1] for col in columns_info]
             else:
-                # Si la table n'existe pas, on définit des colonnes par défaut (on peut laisser vide)
-                # Pour éviter l'erreur, on passe
                 st.warning(f"La table {table} n'existe pas. Elle sera ignorée.")
                 data_frames[table] = pd.DataFrame()
                 continue
-                        # --- DEBUG : afficher un aperçu des tables problématiques ---
-            st.write("**Diagnostic export**")
-            for t in ["mesures_morpho", "mesures_mamelles"]:
-                if t in data_frames:
-                    df = data_frames[t]
-                    st.write(f"Table {t} : {len(df)} lignes")
-                    if not df.empty:
-                        st.dataframe(df.head(3))
-                    else:
-                        st.write("→ Table vide")
-                else:
-                    st.write(f"Table {t} absente de data_frames")
-            # Créer un dataframe vide avec ces colonnes
+            
             df_empty = pd.DataFrame(columns=columns)
             
             try:
-                # Remplir avec les données de l'utilisateur selon le type de table
                 if table == "eleveurs":
                     df_data = pd.read_sql_query(f"SELECT * FROM {table} WHERE user_id=?", db.conn, params=(st.session_state.user_id,))
                 elif table == "elevages":
@@ -2840,23 +2871,18 @@ def page_export():
                         WHERE el.user_id=?
                     """, db.conn, params=(st.session_state.user_id,))
                 else:
-                    # tables globales
                     df_data = pd.read_sql_query(f"SELECT * FROM {table}", db.conn)
                 
-                # Concaténer le vide avec les données (si les colonnes correspondent)
-                # On utilise concat pour garder l'ordre des colonnes
                 df_combined = pd.concat([df_empty, df_data], ignore_index=True)
                 data_frames[table] = df_combined
             except Exception as e:
                 st.error(f"Erreur lors de l'export de la table {table}: {e}")
-                data_frames[table] = df_empty  # au moins les colonnes
+                data_frames[table] = df_empty
         
-        # Générer le fichier selon le format
         if format_export.startswith("Excel"):
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 for name, df in data_frames.items():
-                    # Limiter le nom de l'onglet à 31 caractères
                     sheet_name = name[:31]
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
             output.seek(0)
@@ -2866,18 +2892,12 @@ def page_export():
                 file_name=f"ovin_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-        else:  # CSV
+        else:
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED) as zip_file:
                 for name, df in data_frames.items():
-                    if not df.empty:
-                        csv_data = df.to_csv(index=False).encode('utf-8')
-                        zip_file.writestr(f"{name}.csv", csv_data)
-                    else:
-                        # Même vide, on peut créer un fichier avec juste les en-têtes
-                        csv_data = df.to_csv(index=False).encode('utf-8')
-                        zip_file.writestr(f"{name}.csv", csv_data)
-                # Ajouter les photos si demandé
+                    csv_data = df.to_csv(index=False).encode('utf-8')
+                    zip_file.writestr(f"{name}.csv", csv_data)
                 if inclure_photos and os.path.exists(PHOTO_DIR):
                     for root, dirs, files in os.walk(PHOTO_DIR):
                         for file in files:
@@ -2892,12 +2912,11 @@ def page_export():
             )
 
 # -----------------------------------------------------------------------------
-# PAGE ÉLITE ET COMPARAISON (inchangée)
+# PAGE ÉLITE ET COMPARAISON
 # -----------------------------------------------------------------------------
 def page_elite():
     st.title("🏆 Élite et comparaison")
     
-    # Récupérer les brebis selon le contexte (éleveur sélectionné ou tous)
     params = [st.session_state.user_id]
     query_brebis = """
         SELECT b.id, b.numero_id, b.nom, b.race, b.date_naissance, b.poids_vif,
@@ -2916,7 +2935,6 @@ def page_elite():
     
     df = pd.DataFrame(brebis, columns=["id", "numero", "nom", "race", "naissance", "poids", "elevage", "eleveur"])
     
-    # Production laitière moyenne des 30 derniers jours
     prod_moy = []
     for bid in df["id"]:
         prod = db.fetchone("""
@@ -2926,7 +2944,6 @@ def page_elite():
         prod_moy.append(prod[0] if prod and prod[0] else 0)
     df["prod_moy (L/j)"] = prod_moy
     
-    # Dernier score morphologique
     score_morpho = []
     for bid in df["id"]:
         score = db.fetchone("""
@@ -2936,10 +2953,8 @@ def page_elite():
         score_morpho.append(score[0] if score else 0)
     df["score_morpho"] = score_morpho
     
-    # Estimation simple de la viande
     df["viande_estimee (kg)"] = df["poids"] * 0.45
     
-    # Dernière composition enregistrée (rendement)
     rendement = []
     for bid in df["id"]:
         comp = db.fetchone("""
@@ -2949,19 +2964,16 @@ def page_elite():
         rendement.append(comp[0] if comp else None)
     df["rendement (%)"] = rendement
     
-    # Affichage du tableau
     st.subheader("📊 Tableau des brebis")
     colonnes_affichees = ["numero", "nom", "eleveur", "elevage", "race", "poids", "prod_moy (L/j)", "score_morpho", "viande_estimee (kg)", "rendement (%)"]
     st.dataframe(df[colonnes_affichees].round(2))
     
-    # Classement
     st.subheader("🏆 Classement")
     critere = st.selectbox("Critère de classement", 
                            ["prod_moy (L/j)", "score_morpho", "viande_estimee (kg)", "poids", "rendement (%)"])
     top_n = st.slider("Nombre de brebis à afficher", 5, 50, 10)
     ascending = st.checkbox("Ordre croissant", False)
     
-    # Conversion explicite en numérique et suppression des lignes sans valeur
     df[critere] = pd.to_numeric(df[critere], errors='coerce')
     df_class = df[df[critere].notna()].copy()
     if df_class.empty:
@@ -2976,7 +2988,6 @@ def page_elite():
         fig = px.bar(top, x="nom", y=critere, color="eleveur", title=f"Top {top_n} - {critere}")
         st.plotly_chart(fig, use_container_width=True)
     
-    # Comparaison entre éleveurs (si tous sélectionnés)
     if st.session_state.eleveur_id is None and len(df["eleveur"].unique()) > 1:
         st.subheader("📈 Comparaison par éleveur")
         numeric_cols = ["prod_moy (L/j)", "score_morpho", "poids", "viande_estimee (kg)", "rendement (%)"]
@@ -2990,7 +3001,7 @@ def page_elite():
         st.plotly_chart(fig2, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# NOUVELLE PAGE IA & DATA MINING
+# PAGE IA & DATA MINING
 # -----------------------------------------------------------------------------
 def page_ia():
     st.title("🧠 Intelligence Artificielle & Data Mining")
@@ -3003,14 +3014,11 @@ def page_ia():
         "📂 Analyse exploratoire (import)"
     ])
 
-    # --- Onglet 1 : Prédiction laitière avancée ---
     with tab1:
         st.subheader("Prédiction de production laitière par modèle ML")
-        # Vérifier si un modèle existe
         model_path = os.path.join(MODEL_DIR, 'lait_model.pkl')
         if os.path.exists(model_path):
             st.success("Un modèle ML est disponible.")
-            # Sélectionner une brebis
             params = [st.session_state.user_id]
             query_brebis = """
                 SELECT b.id, b.numero_id, b.nom, e.nom
@@ -3045,10 +3053,8 @@ def page_ia():
                         model, score = result
                         st.success(f"Modèle entraîné avec un score R² de {score:.2f} sur le test.")
 
-    # --- Onglet 2 : Détection d'anomalies ---
     with tab2:
         st.subheader("Détection d'anomalies (Isolation Forest)")
-        # Récupérer les données nécessaires
         params = [st.session_state.user_id]
         query_brebis = """
             SELECT b.id, b.numero_id, b.nom, b.poids_vif,
@@ -3067,12 +3073,10 @@ def page_ia():
         if df.empty:
             st.warning("Aucune donnée disponible.")
         else:
-            # Remplir les NaN
             df['viande_estimee'] = df['poids_vif'] * 0.45
             df['prod_moy'] = df['prod_moy'].fillna(0)
             df['score_morpho'] = df['score_morpho'].fillna(0)
             
-            # Détection
             features = ['prod_moy', 'score_morpho', 'poids_vif', 'viande_estimee']
             X = df[features].fillna(0)
             model = IsolationForest(contamination=0.1, random_state=42)
@@ -3085,10 +3089,8 @@ def page_ia():
             else:
                 st.success("Aucune anomalie détectée.")
 
-        # --- Onglet 3 : Clustering des brebis ---
     with tab3:
         st.subheader("Clustering des brebis (K-Means)")
-        # Récupérer les données
         params = [st.session_state.user_id]
         query_brebis = """
             SELECT b.id, b.numero_id, b.nom, b.poids_vif,
@@ -3113,7 +3115,7 @@ def page_ia():
             df['score_morpho'] = df['score_morpho'].fillna(0)
             
             n_brebis = len(df)
-            max_clusters = min(5, n_brebis)  # on ne peut pas avoir plus de clusters que de brebis
+            max_clusters = min(5, n_brebis)
             if max_clusters < 2:
                 st.warning(f"Pas assez de brebis ({n_brebis}) pour effectuer un clustering (minimum 2).")
             else:
@@ -3128,15 +3130,12 @@ def page_ia():
                 clusters = kmeans.fit_predict(X_scaled)
                 df['cluster'] = clusters
                 
-                # Affichage 3D
                 fig = px.scatter_3d(df, x='prod_moy', y='score_morpho', z='poids_vif', color='cluster',
                                      hover_data=['numero_id', 'nom'], title="Clusters des brebis")
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Statistiques par cluster
                 st.dataframe(df.groupby('cluster')[features].mean().round(2))
 
-       # --- Onglet 4 : Analyse exploratoire (import) ---
     with tab4:
         st.subheader("Analyse exploratoire d'un fichier externe")
         uploaded_file = st.file_uploader("Choisir un fichier CSV ou Excel", type=['csv', 'xlsx'])
@@ -3184,7 +3183,6 @@ def sidebar():
         st.divider()
         
         if st.session_state.user_id:
-            # --- Sélection de l'éleveur actif ---
             eleveurs = db.fetchall(
                 "SELECT id, nom FROM eleveurs WHERE user_id=? ORDER BY nom",
                 (st.session_state.user_id,)
@@ -3207,7 +3205,6 @@ def sidebar():
             )
             st.session_state.eleveur_id = eleveurs_options[selected_label]
             st.divider()
-            # --- Fin sélection éleveur ---
             
             menu = st.radio(
                 "Navigation",
@@ -3305,7 +3302,6 @@ def main():
 # POINT D'ENTRÉE
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Initialisation de la base de données et de la session
     db = get_database()
     genomic_analyzer = GenomicAnalyzer()
     
@@ -3314,7 +3310,6 @@ if __name__ == "__main__":
         st.session_state.current_page = "login"
         st.session_state.eleveur_id = None
     
-    # Configuration de la page
     st.set_page_config(
         page_title="Ovin Manager Pro",
         page_icon="🐑",
@@ -3322,7 +3317,6 @@ if __name__ == "__main__":
         initial_sidebar_state="expanded"
     )
     
-    # CSS personnalisé
     st.markdown("""
     <style>
         .main-header {
